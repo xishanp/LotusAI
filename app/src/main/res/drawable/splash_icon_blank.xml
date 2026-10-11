@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 系统启动页的图标：全透明。
+     不这样做的话，Android 12+ 会把应用图标放大摆在启动页正中间（用户点名"很丑"）。
+     启动页的内容改由 Compose 的 LotusSplash 负责：立绘 + 应用名。 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+  <solid android:color="@android:color/transparent" />
+  <size android:width="1dp" android:height="1dp" />
+</shape>

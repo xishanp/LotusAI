@@ -1,0 +1,7 @@
+<resources>
+  <!-- 画布：苹果风冷白。同时是冷启动的 windowBackground / windowSplashScreenBackground。
+       ⚠️ 必须和 ui/theme/LotusTheme.kt 的 LotusPalette.Canvas 逐位一致，
+          否则冷启动会先白一下、再跳到 App 的冷白。 -->
+  <color name="lotus_canvas">#FFF6F6F9</color>
+  <color name="lotus_icon_background">#FFFFFF</color>
+</resources>

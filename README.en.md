@@ -97,4 +97,4 @@ Currently a **fast-test build** (debug-signed).
 
 ---
 
-**This is a fast build; updated weekly.**
+**A new build every 7 days.**

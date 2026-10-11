@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  API < 31 的冷启动窗口背景（Android 12+ 不会用到这一层，见 themes.xml 的 windowSplashScreen*）。
+
+  纯白 + 居中的启动页图形。图形尺寸必须与
+  [ai.lotus.app.ui.LotusSplash] 的 288dp x 288dp 一致，交接处才不会跳。
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+  <item android:drawable="@color/lotus_canvas" />
+  <item android:gravity="center" android:width="288dp" android:height="288dp">
+    <bitmap android:src="@drawable/lotus_splash_icon" android:gravity="fill" />
+  </item>
+</layer-list>
