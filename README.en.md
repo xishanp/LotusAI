@@ -2,7 +2,7 @@
   <img src="assets/banner.png" alt="Lotus AI" width="100%">
 </p>
 
-<h3 align="center">Pure chat · Liquid glass · An AI that remembers</h3>
+<h3 align="center">Liquid Glass · An AI that remembers</h3>
 
 <p align="center">
   <a href="README.md">中文</a> · <b>English</b>
@@ -10,59 +10,67 @@
 
 ---
 
-**Lotus AI** is a pure chat app for Android. No agent, no tool chain — it does one thing well:
-a conversation. **One question = one model call**, so token usage stays minimal and answers come back
-fast, while keeping a complete memory framework and a persona you can rewrite.
+**Lotus AI** is an AI chat app for Android. The whole interface is one sheet of liquid glass, and
+the conversation itself is clean, quick, and effortless.
 
-## Why not "yet another agent"
+It remembers you, understands a persona, and keeps token usage as low as it can.
 
-With the same model, a chat app can cost a fraction of an agent — the difference is not the model,
-it is **what you stuff into the request**:
+## Why it feels light
 
-| | Plain chat (Lotus) | Agent / Codex / OpenClaw style |
-| --- | --- | --- |
-| One question | **one call** | one call × many tool loops |
-| System prompt | persona + memory | persona + memory + docs for dozens of tools |
-| Context | what you actually said | tool output, file contents, logs |
-| Feel | fast, cheap | slow, expensive |
+- **Light.** One question = one model call. The request carries your persona, your memory, and
+  what you actually said — nothing else slowing it down. Every token spent is visible.
+- **Fast.** Streaming answers, shown as they're written. Reasoning is kept, and the effort levels
+  follow the model — as many as it really supports, no more, no less.
+- **Cheap.** Live context usage, per-conversation trimming and compression; compression only
+  touches the summary, never deletes a single original message.
+- **It remembers.** Long-term memory lives in a `MEMORY.md` you can open and edit.
+- **It feels like someone.** Persona and tone are plain text. Change them whenever you like.
 
-Lotus stays in the left column. **No skills, no tools, no MCP** — that is exactly where the right
-column's cost comes from.
+## The interface: liquid glass throughout
 
-## Liquid glass, everywhere
+- One recipe everywhere: **light blur + edge refraction + chromatic dispersion + white inner rim
+  + soft outer shadow**, on pure white, with no colour.
+- No second piece of glass inside a piece of glass: embedded buttons are invisible at rest and
+  only surface a refraction while pressed.
+- Every control responds — press-scale, edge refraction, neighbouring glass swaying slightly.
 
-- One recipe for every glass surface: **light blur + edge refraction + chromatic dispersion + a white
-  inner rim + a soft outer shadow**, on a pure white background with no colour.
-- No second glass inside a glass: nested buttons are invisible at rest and only refract while pressed.
-- Every control has real feedback — press scale, edge refraction, and neighbouring glass leans along.
+## Memory and persona: a set of Markdown files you can edit
 
-## Memory & persona: plain Markdown you can edit
-
-Both live as plain text files, editable from the "Files" tab:
+Persona and memory are plain text, editable right inside the app:
 
 ```
 filesDir/md/
-├── IDENTITY.md   who I am        ← injected every turn
-├── SOUL.md       how I speak     ← injected every turn
-├── AGENTS.md     rules & limits  ← injected every turn
-├── USER.md       about you       ← injected every turn
-├── MEMORY.md     long-term memory← injected every turn
+├── IDENTITY.md   who I am           ← injected every turn
+├── SOUL.md       how I speak        ← injected every turn
+├── AGENTS.md     rules and limits   ← injected every turn
+├── USER.md       about you          ← injected every turn
+├── MEMORY.md     long-term memory   ← injected every turn
 └── memory/       archive (not injected)
     facts · decisions · lessons · projects · references · tasks · temporary
 ```
 
-- **Automatic memory**: the model writes a single `<!--memo: your name is K -->` line, the client
-  strips it from the same reply and appends it to `MEMORY.md` — no second request, no extra tokens.
-- **Manual memory**: `⋯ → Remember this` turns the current conversation into a few long-term lines.
-- **Auto title**: each conversation gets a generated topic after its first reply.
+- **Automatic memory**: the model writes what's worth keeping as one hidden marker, and the client
+  strips it out of **the same reply** and appends it to `MEMORY.md` — no second request, no extra
+  tokens. If you say "remember this", it is actually saved.
+- **Manual memory**: `⋯ → Remember this` in a chat condenses the conversation into a few
+  long-term memories.
+- **Conversation titles**: auto-generated once, after the first reply.
+- **Persona**: rename it, change its tone, change its rules — all in your own Markdown.
+
+## Chatting
+
+- **Long-press any message** → copy / quote / edit & resend / regenerate / withdraw.
+- Images: a picked image is really sent with your message; models that can see, see it.
+- Image generation: fill in a service under *Default model → Side capabilities*, then just ask.
 
 ## Models
 
-- **OpenAI-compatible protocol**; provider, base URL and API key are entirely yours to fill in —
-  nothing is preconfigured.
-- Thinking tiers map to each model's real capability (`medium` / `high` / `xhigh` … up to `max` / `ultra`).
-- Web search is opt-in: it only adds `tools:[{"type":"web_search"}]` to the body — the upstream does
-  the searching, and the client still makes **exactly one call**.
+- **OpenAI-compatible.** Provider, base URL and key are all yours to fill in; the app ships with
+  no vendor baked in.
+- Thinking levels map to what the model actually supports (`medium` / `high` / `xhigh` … up to
+  `max` / `ultra`).
+- Web search is optional: turning it on adds a single `tools:[{"type":"web_search"}]` field and
+  lets the upstream do the searching — still one call from the client.
 
 ## Screenshots
 
@@ -74,21 +82,19 @@ filesDir/md/
 | --- | --- |
 | <img src="assets/screen-files.png" width="330"> | <img src="assets/screen-about.png" width="330"> |
 
-## Open-source dependencies
+## Credits
 
-Liquid glass is not something a single `blur()` can fake — thanks to the upstream projects:
+Liquid glass is not something a single `blur()` gets you. Thanks to:
 
-| Dependency | Purpose | License |
+| Dependency | Role | License |
 | --- | --- | --- |
-| [Kyant0/AndroidLiquidGlass](https://github.com/Kyant0/AndroidLiquidGlass) (`io.github.kyant0:backdrop` / `shapes`) | refraction / dispersion / blur foundation | Apache-2.0 |
-| [chrisbanes/haze](https://github.com/chrisbanes/haze) | blur foundation | Apache-2.0 |
+| [Kyant0/AndroidLiquidGlass](https://github.com/Kyant0/AndroidLiquidGlass) (`io.github.kyant0:backdrop` / `shapes`) | refraction / dispersion / blur base | Apache-2.0 |
+| [chrisbanes/haze](https://github.com/chrisbanes/haze) | blur base | Apache-2.0 |
 
 ## Download
 
-Grab the APK from [Releases](../../releases). This is a **fast-test build** (debug signed).
-
-In the app: `Settings → About → Check for updates` reads the latest Release tag of this repository.
+Currently a **fast-test build** (debug-signed).
 
 ---
 
-**Fast build, updated weekly.**
+**This is a fast build; updated weekly.**
