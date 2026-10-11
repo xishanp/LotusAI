@@ -12,3 +12,6 @@ captures/
 
 # 本地开发产物（截图 / 生图临时文件）
 output/
+
+# 本地回收站
+.trash-src/
