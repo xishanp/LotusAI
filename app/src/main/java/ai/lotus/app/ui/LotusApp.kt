@@ -69,6 +69,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -284,11 +285,12 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
 
   // 附件存**私有目录里的文件路径**（相册给的 content:// 是一次性授权，重启就失效）。
   // 见 data/Attachments.kt。
-  var attachmentPath by remember { mutableStateOf<String?>(null) }
+  var attachmentPaths by remember { mutableStateOf<List<String>>(emptyList()) }
   // 视频 / 文件（见 data/Attachments.kt 的 DocRef）。图片之外还得能带这两样。
   var attachDoc by remember { mutableStateOf<ai.lotus.app.data.DocRef?>(null) }
   // 「+」的那张小菜单：图片 / 视频 / 文件。
   var attachMenu by remember { mutableStateOf(false) }
+  val scope = rememberCoroutineScope()
   val pickVideo =
     rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
       if (uri != null) {
@@ -302,14 +304,19 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
       }
     }
   val pickImage =
-    rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-      if (uri != null) {
-        val path = Attachments.import(context, uri)
-        if (path != null) attachmentPath = path
+    rememberLauncherForActivityResult(
+      ActivityResultContracts.PickMultipleVisualMedia(Attachments.MaxImages)
+    ) { uris ->
+      if (uris.isNotEmpty()) {
+        scope.launch {
+          val imported =
+            withContext(Dispatchers.IO) { Attachments.importMany(context, uris) }
+          attachmentPaths =
+            (attachmentPaths + imported).distinct().take(Attachments.MaxImages)
+        }
       }
     }
   var nextId by remember { mutableStateOf(1L) }
-  val scope = rememberCoroutineScope()
 
   // ---- 「检查更新」的弹层状态 ----
   //
@@ -378,6 +385,7 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
         it.tools,
         it.toolLog,
         it.sources,
+        imagePaths = it.displayImagePaths,
       )
     }
 
@@ -441,7 +449,7 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
     currentId = null
     inChat = false
     draft = ""
-    attachmentPath = null
+    attachmentPaths = emptyList()
     attachDoc = null
     closeOverlays()
     focus.clearFocus()
@@ -453,7 +461,7 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
     currentId = null
     inChat = false
     draft = ""
-    attachmentPath = null
+    attachmentPaths = emptyList()
     closeOverlays()
     focus.clearFocus()
   }
@@ -477,6 +485,7 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
             it.tools,
             it.toolLog,
             it.sources,
+            imagePaths = it.allImagePaths,
           )
         }
       )
@@ -487,7 +496,7 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
       //    少了这一行就会出现"点了会话但停在设置页，看着像没反应"。
       tab = LotusTab.Chat
     }
-    attachmentPath = null
+    attachmentPaths = emptyList()
     closeOverlays()
     focus.clearFocus()
   }
@@ -676,10 +685,15 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
     // 而且看图模型本来也只需要看最新那张。
     val lastUserIndex = recent.indexOfLast { it.fromUser }
     recent.forEachIndexed { idx, m ->
-      val shot =
-        if (idx == lastUserIndex && m.imagePath.isNotBlank()) Attachments.dataUrl(m.imagePath)
-        else null
-      turns += ChatTurn(if (m.fromUser) "user" else "assistant", m.text, shot)
+      val shots =
+        if (idx == lastUserIndex) m.displayImagePaths.mapNotNull(Attachments::dataUrl)
+        else emptyList()
+      turns +=
+        ChatTurn(
+          role = if (m.fromUser) "user" else "assistant",
+          content = m.text,
+          imageDataUrls = shots,
+        )
     }
     return turns
   }
@@ -1199,11 +1213,11 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
       }
     }
     // ⚠️ 只带图、没打字也要能发（用户口径：「我单独直接发一张图片，发不出去，狂按都没用」）。
-    val shot = attachmentPath
+    val shots = attachmentPaths
     val doc = attachDoc
-    if (text.isEmpty() && shot == null && doc == null) return
+    if (text.isEmpty() && shots.isEmpty() && doc == null) return
     draft = ""
-    attachmentPath = null
+    attachmentPaths = emptyList()
     attachDoc = null
     // 视频 / 文件**原样进这条消息**：
     //  · 纯文本文件 → 内容真的贴进去（模型能用上）；
@@ -1233,7 +1247,8 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
         true,
         body,
         System.currentTimeMillis(),
-        imagePath = shot.orEmpty(),
+        imagePath = shots.firstOrNull().orEmpty(),
+        imagePaths = shots,
       )
     // 会话在这里才真正诞生 + 落盘（首次发消息时）。
     ensureConversation()
@@ -1575,20 +1590,28 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
                 onRemove = { attachDoc = null },
                 modifier =
                   Modifier.align(Alignment.BottomStart)
-                    .offset(y = -aboveComposer - (if (attachmentPath != null) 52.dp else 0.dp))
+                    .offset(y = -aboveComposer - (if (attachmentPaths.isNotEmpty()) 52.dp else 0.dp))
                     .padding(start = 22.dp),
               )
             }
 
-            attachmentPath?.let { path ->
-              AttachmentChip(
-                uri = Uri.fromFile(java.io.File(path)),
-                onRemove = { attachmentPath = null },
+            if (attachmentPaths.isNotEmpty()) {
+              Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier =
                   Modifier.align(Alignment.BottomStart)
                     .offset(y = -aboveComposer)
-                    .padding(start = 22.dp),
-              )
+                    .padding(start = 22.dp)
+                    .widthIn(max = 804.dp)
+                    .horizontalScroll(rememberScrollState()),
+              ) {
+                attachmentPaths.forEach { path ->
+                  AttachmentChip(
+                    uri = Uri.fromFile(java.io.File(path)),
+                    onRemove = { attachmentPaths = attachmentPaths.filterNot { it == path } },
+                  )
+                }
+              }
             }
 
             // ⚠️ 面板的开/关都要走动画：进场淡入上浮，退场**往下滑**淡出。

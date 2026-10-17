@@ -109,6 +109,8 @@ data class ChatTurn(
   val role: String,
   val content: String,
   val imageDataUrl: String? = null,
+  /** OpenAI 兼容请求里的多图列表；与 [imageDataUrl] 同时存在时会合并。 */
+  val imageDataUrls: List<String> = emptyList(),
 )
 
 /** 流式聊天里往外吐的东西。 */
@@ -199,27 +201,37 @@ fun LlmApi.chatStream(
             turns.map { t ->
               buildJsonObject {
                 put("role", JsonPrimitive(t.role))
-                val image = t.imageDataUrl
-                if (image.isNullOrBlank()) {
+                val images =
+                  buildList {
+                    t.imageDataUrl?.takeIf { it.isNotBlank() }?.let(::add)
+                    addAll(t.imageDataUrls.filter { it.isNotBlank() })
+                  }.distinct()
+                if (images.isEmpty()) {
                   put("content", JsonPrimitive(t.content))
                 } else {
-                  // 多模态：文字 + 图。OpenAI 兼容的格式，看图模型都吃这一套。
+                  // 多模态：一段文字 + 多张图。OpenAI 兼容接口按 image_url 的数量逐张接收。
                   put(
                     "content",
                     JsonArray(
-                      listOf(
-                        buildJsonObject {
-                          put("type", JsonPrimitive("text"))
-                          put("text", JsonPrimitive(t.content))
-                        },
-                        buildJsonObject {
-                          put("type", JsonPrimitive("image_url"))
-                          put(
-                            "image_url",
-                            buildJsonObject { put("url", JsonPrimitive(image)) },
+                      buildList {
+                        add(
+                          buildJsonObject {
+                            put("type", JsonPrimitive("text"))
+                            put("text", JsonPrimitive(t.content))
+                          }
+                        )
+                        images.forEach { image ->
+                          add(
+                            buildJsonObject {
+                              put("type", JsonPrimitive("image_url"))
+                              put(
+                                "image_url",
+                                buildJsonObject { put("url", JsonPrimitive(image)) },
+                              )
+                            }
                           )
-                        },
-                      )
+                        }
+                      }
                     ),
                   )
                 }

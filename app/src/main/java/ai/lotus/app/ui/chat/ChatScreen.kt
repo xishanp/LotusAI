@@ -139,7 +139,15 @@ data class ChatMessage(
    *    这个是上游检索通道报回来的。**上游不给就老实空着**，不许拿正文链接冒充访问记录。
    */
   val sources: List<String> = emptyList(),
-)
+  /** 用户这条消息带的多张图。旧消息仍然只有 [imagePath]。 */
+  val imagePaths: List<String> = emptyList(),
+) {
+  /** 新消息用多图列表；旧消息自动退回单图字段。 */
+  val displayImagePaths: List<String>
+    get() = imagePaths.distinct().ifEmpty {
+      imagePath.takeIf { it.isNotBlank() }?.let(::listOf).orEmpty()
+    }
+}
 
 /**
  * 聊天页要显示哪些附加信息。
@@ -204,7 +212,7 @@ fun ChatScreen(
   val clipboard = LocalContext.current.getSystemService(ClipboardManager::class.java)
 
   // 新消息 / 模拟回复落地后，滚到最后一条（生图贴上来也要滚）。
-  LaunchedEffect(messages.size, messages.lastOrNull()?.text, messages.lastOrNull()?.imagePath) {
+  LaunchedEffect(messages.size, messages.lastOrNull()?.text, messages.lastOrNull()?.displayImagePaths?.joinToString("|")) {
     if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
   }
   Box(
@@ -299,33 +307,27 @@ private fun MessageRow(
   @Composable
   fun BubbleContent() {
     Column {
-      if (message.imagePath.isNotBlank()) {
-        val shot = rememberFileBitmap(message.imagePath)
-        // 图第一次出现 → 0→1，配合 graphicsLayer + blur 做"从模糊收到清晰"。
-        var landed by remember(message.imagePath) { mutableStateOf(false) }
-        LaunchedEffect(message.imagePath) { landed = true }
-        val land by
-          androidx.compose.animation.core.animateFloatAsState(
-            targetValue = if (landed) 1f else 0f,
-            animationSpec = tween(420),
-            label = "imageLand",
-          )
-        if (shot != null) {
-          Image(
-            bitmap = shot,
-            contentDescription = if (message.fromUser) "发出的图片" else "生成的图片",
-            contentScale = ContentScale.Fit,
-            modifier =
-              Modifier.widthIn(max = 232.dp)
-                .heightIn(max = 300.dp)
-                .graphicsLayer {
-                  // 占位玻璃 → 真图：从「模糊 + 略大」收到「清晰 + 原位」。
-                  scaleX = 1f + 0.06f * (1f - land)
-                  scaleY = 1f + 0.06f * (1f - land)
-                  alpha = 0.25f + 0.75f * land
-                }
-                .clip(RoundedCornerShape(14.dp)),
-          )
+      val paths = message.displayImagePaths
+      if (paths.isNotEmpty()) {
+        val compact = paths.size > 1
+        FlowRow(
+          horizontalArrangement = Arrangement.spacedBy(6.dp),
+          verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+          paths.forEach { path ->
+            val shot = rememberFileBitmap(path)
+            if (shot != null) {
+              Image(
+                bitmap = shot,
+                contentDescription = if (message.fromUser) "发出的图片" else "生成的图片",
+                contentScale = ContentScale.Fit,
+                modifier =
+                  Modifier.widthIn(max = if (compact) 150.dp else 232.dp)
+                    .heightIn(max = if (compact) 190.dp else 300.dp)
+                    .clip(RoundedCornerShape(14.dp)),
+              )
+            }
+          }
         }
         if (message.text.isNotBlank()) Spacer(Modifier.height(8.dp))
       }
@@ -357,7 +359,7 @@ private fun MessageRow(
       // 流式阶段正文没出来时，过程玻璃就是主体；不要再额外挂一个空白气泡。
       val showBubble =
         message.text.isNotBlank() ||
-          message.imagePath.isNotBlank() ||
+          message.displayImagePaths.isNotEmpty() ||
           painting ||
           !streaming ||
           !processOpen

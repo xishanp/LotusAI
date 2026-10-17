@@ -18,8 +18,8 @@ android {
     applicationId = "ai.lotus.app"
     minSdk = 28
     targetSdk = 35
-    versionCode = 2026101901
-    versionName = "2026.10.19"
+    versionCode = 2026101902
+    versionName = "2026.10.19.2"
   }
 
   buildTypes {

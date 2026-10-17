@@ -63,7 +63,15 @@ data class StoredMessage(
    * **不许**拿正文里模型自己写的链接顶上（那是"说得像真的"）。
    */
   val sources: List<String> = emptyList(),
-)
+  /** 用户这条消息带的多张图。旧会话只有 [imagePath]，读取时由 [allImagePaths] 兼容。 */
+  val imagePaths: List<String> = emptyList(),
+) {
+  /** 新消息优先用多图列表；旧数据自动退回单图字段。 */
+  val allImagePaths: List<String>
+    get() = imagePaths.distinct().ifEmpty {
+      imagePath.takeIf { it.isNotBlank() }?.let(::listOf).orEmpty()
+    }
+}
 
 /**
  * 一个会话。

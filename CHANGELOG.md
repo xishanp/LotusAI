@@ -1,5 +1,23 @@
 # 更新日志 / Changelog
 
+## v2026.10.19.2 — 图片多选修复
+
+- 图片选择器改为多选，单条消息最多可附加 9 张图片。
+- 输入条支持多张图片缩略图横向预览、逐张移除。
+- 同一条消息会把所有图片按 OpenAI 兼容格式发送给支持视觉的模型。
+- 聊天记录保存并展示消息关联的多张图片；旧版单图会话继续兼容。
+
+---
+
+## v2026.10.19.2 — Multi-image selection fix
+
+- The photo picker now supports multi-select, with up to 9 images per message.
+- The composer previews attached images in a horizontally scrollable strip and allows removing them one by one.
+- All images on a message are sent to vision-capable models using the OpenAI-compatible multi-image payload.
+- Conversations persist and display multiple images per message while remaining compatible with older single-image sessions.
+
+---
+
 ## v2026.10.19 — 记忆与聊天链路更新
 
 - 首次启动重做：欢迎页 → 连接主模型 → 与小莲完成一轮真实初始化对话 → 进入主页；初始化阶段可以跳过，Key 和配置只保存在本机。

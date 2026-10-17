@@ -22,6 +22,9 @@ import java.io.FileOutputStream
  * ⚠️ 只发**本地文件**，不要发远端 URL；也别把图片写进 conversations.json（会把那个文件撑爆）。
  */
 object Attachments {
+  /** 单条消息最多带几张图。够覆盖常规参考图，又不会把请求体撑爆。 */
+  const val MaxImages = 9
+
   private const val DirName = "images"
   private const val MaxDim = 1280
   private const val JpegQuality = 85
@@ -58,13 +61,17 @@ object Attachments {
           } else {
             decoded
           }
-        val file = File(dir(context), "img_${System.currentTimeMillis()}.jpg")
+        val file = File(dir(context), "img_${System.currentTimeMillis()}_${System.nanoTime()}.jpg")
         FileOutputStream(file).use { out.compress(Bitmap.CompressFormat.JPEG, JpegQuality, it) }
         if (out !== decoded) out.recycle()
         decoded.recycle()
         file.absolutePath
       }
       .getOrNull()
+
+  /** 批量导入；保持相册选择顺序，失败的单张跳过。 */
+  fun importMany(context: Context, uris: List<Uri>): List<String> =
+    uris.take(MaxImages).mapNotNull { import(context, it) }
 
   /** 本地图片路径 → `data:image/jpeg;base64,…`（请求里 image_url 要的就是它）。 */
   fun dataUrl(path: String): String? =
