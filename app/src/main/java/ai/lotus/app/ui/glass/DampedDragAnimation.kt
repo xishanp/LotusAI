@@ -124,7 +124,11 @@ class DampedDragAnimation(
     fun updateValue(value: Float) {
         val targetValue = value.coerceIn(valueRange)
         animationScope.launch {
-            launch { valueAnimation.animateTo(targetValue, valueAnimationSpec) { updateVelocity() } }
+            // ⚡ 1:1 跟手：拖动时**不再**用 spring 去追手指。
+            // 弹簧追赶会让球在接近下一个格时被拉一把 —— 用户口径「你似乎搞了个两个点之间
+            // 快到的时候的吸附」。指哪点哪，松手之后才由 onDragStopped 吸附到最近的格。
+            updateVelocity()
+            valueAnimation.snapTo(targetValue)
         }
     }
 

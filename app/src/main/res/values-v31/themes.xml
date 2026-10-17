@@ -1,0 +1,11 @@
+<resources>
+  <!-- Android 12+ 的系统启动页。
+       平台只认一个纯色背景和一枚被裁成 192dp 圆形的图标。
+       「立绘 + 应用名」烘进 drawable-nodpi/lotus_splash_icon.png，
+       与 Compose 启动层的尺寸和位置保持一致。 -->
+  <style name="Theme.LotusAI" parent="Theme.LotusAI.Base">
+    <item name="android:windowSplashScreenBackground">@color/lotus_canvas</item>
+    <item name="android:windowSplashScreenAnimatedIcon">@drawable/lotus_splash_icon</item>
+    <item name="android:windowSplashScreenAnimationDuration">0</item>
+  </style>
+</resources>

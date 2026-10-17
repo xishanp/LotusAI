@@ -104,6 +104,10 @@ fun LotusComposer(
    * 不额外占一行、也不新增一个控件。点它照旧弹模型面板。
    */
   modelLabel: String = "",
+  /** 初始化等只用纯输入的页面可以隐藏附件键，避免出现点了没反应的死按键。 */
+  showAttach: Boolean = true,
+  /** 没有模型切换入口的页面可以隐藏模型玻璃片；输入条外观保持一致。 */
+  showModel: Boolean = true,
   onAttach: () -> Unit = {},
   /** 输入条**实测**高度（多行时会往上长）。外壳要用它摆输入条上方的浮层。 */
   onHeightChange: (Dp) -> Unit = {},
@@ -126,8 +130,13 @@ fun LotusComposer(
   //    于是 measured 一旦变大就永远 >56dp，multi 永远为真 —— 用户把字全删了，
   //    玻璃还是两排高，缩不回去（用户原话：「我最后全删了，它却没回到最初的样子」）。
   val measurer = rememberTextMeasurer()
-  val chipW = (listOf(modelLabel.trim(), thinkingLabel.trim()).filter { it.isNotEmpty() }
-      .joinToString(" · ").length * 6.6f + 22f).coerceIn(56f, 130f).dp
+  val chipW =
+    if (!showModel) {
+      0.dp
+    } else {
+      (listOf(modelLabel.trim(), thinkingLabel.trim()).filter { it.isNotEmpty() }
+          .joinToString(" · ").length * 6.6f + 22f).coerceIn(56f, 130f).dp
+    }
   val rowWidth = LocalConfiguration.current.screenWidthDp.dp - 32.dp
   // 一排时文字能用多宽：整条 - 附件键 - 模型片 - 间距 - 发送键 - 内边距。
   val rowTextWidth = (rowWidth - 34.dp - chipW - 4.dp - 38.dp - 16.dp).coerceAtLeast(72.dp)
@@ -364,38 +373,48 @@ fun LotusComposer(
         .padding(horizontal = 6.dp, vertical = 6.dp),
     verticalArrangement = Arrangement.Center,
   ) {
-    if (!multi) {
-      Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        plusButton()
-        Box(modifier = Modifier.weight(1f).padding(horizontal = 8.dp)) { field() }
-        modelButton()
-        Spacer(Modifier.width(4.dp))
+    // ⚠️ 布局结构必须**固定**：这一行永远在，输入框永远待在同一个组合位置上，
+    // 只有旁边那几枚按键会根据 [multi] "搬到下面那一排"去。
+    //
+    // 为什么不能真搬输入框（2026-10-16 血的教训）：
+    //   ① 原先是 `if (!multi) Row{…输入框…} else Column{Box{新 BasicTextField} …}` —— 多行那支
+    //      手写了一个新的输入框，切换时旧节点被销毁 ⇒ 焦点/输入法会话全没，键盘自己收起来；
+    //   ② 改成两边都用 movableContentOf 之后**依然会掉** —— 实测第 20 个字符（正好是单行切
+    //      多行的临界点）键盘被收起：可移动内容的节点换了父级，挂载时焦点仍会被清掉。
+    //   ⇒ 结论：**别搬输入框**。搬按键，输入框原地不动，问题从根上消失。
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+      if (!multi && showAttach) plusButton()
+      Box(
+        modifier =
+          if (multi) {
+            // 多行：文字独占上面一整行（不再被右边那几枚按键挤成窄柱）。
+            // 用户口径：「都开始输入文字了，右边那一大块都拿来干嘛的？」
+            Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp)
+          } else {
+            Modifier.weight(1f).padding(horizontal = 8.dp)
+          }
+      ) {
+        field()
+      }
+      if (!multi) {
+        if (showModel) {
+          modelButton()
+          Spacer(Modifier.width(4.dp))
+        }
         sendButton()
       }
-    } else {
-      // 多行：文字独占上面**一整行**（不再被右边那几枚按键挤成窄柱），按键退到下面一排。
-      // 用户口径：「都开始输入文字了，右边那一大块都拿来干嘛的？」
-      Box(modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 2.dp)) {
-        BasicTextField(
-          value = value,
-          onValueChange = onValueChange,
-          singleLine = false,
-          maxLines = 20,
-          keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-          keyboardActions = KeyboardActions(onSend = { onSend() }),
-          textStyle = LocalTextStyle.current.copy(color = LotusPalette.Ink, fontSize = 15.sp),
-          cursorBrush = SolidColor(LotusPalette.Ink),
-          modifier = Modifier.fillMaxWidth(),
-        )
-      }
+    }
+    if (multi) {
       Row(
         modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
       ) {
-        plusButton()
+        if (showAttach) plusButton()
         Spacer(Modifier.weight(1f))
-        modelButton()
-        Spacer(Modifier.width(4.dp))
+        if (showModel) {
+          modelButton()
+          Spacer(Modifier.width(4.dp))
+        }
         sendButton()
       }
     }

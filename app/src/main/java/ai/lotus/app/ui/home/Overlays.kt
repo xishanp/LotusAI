@@ -25,6 +25,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.Image
+import androidx.compose.ui.layout.ContentScale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -36,6 +43,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -48,9 +56,13 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -113,7 +125,9 @@ fun ConversationHistoryPanel(
         .width(304.dp)
         .heightIn(max = 430.dp)
         // 浮层玻璃统一配方（floatGlass）：不发白霜、描边浓度跟全 App 一致。
-        .floatGlass(shape = shape, strength = 0.55f, elevation = 14.dp)
+        // 菜单背后经常直接压着正文；保留低模糊的观感，但比页面内玻璃略高，
+        // 让列表文字不会从菜单里透出来叠成重影。
+        .floatGlass(shape = shape, strength = 0.55f, elevation = 14.dp, blurScale = 0.58f)
         .padding(vertical = 8.dp),
   ) {
     // 标题行 + 新建
@@ -224,6 +238,8 @@ fun GlassPromptDialog(
   initial: String,
   confirmLabel: String,
   modifier: Modifier = Modifier,
+  hint: String = "",
+  maskInput: Boolean = false,
   onConfirm: (String) -> Unit,
   onDismiss: () -> Unit,
 ) {
@@ -275,8 +291,15 @@ fun GlassPromptDialog(
           singleLine = true,
           textStyle = androidx.compose.ui.text.TextStyle(color = LotusPalette.Ink, fontSize = 15.sp),
           cursorBrush = SolidColor(LotusPalette.Ink),
+          visualTransformation =
+            if (maskInput) PasswordVisualTransformation() else VisualTransformation.None,
           modifier = Modifier.fillMaxWidth(),
         )
+      }
+
+      if (hint.isNotBlank()) {
+        Spacer(Modifier.height(8.dp))
+        Text(text = hint, color = LotusPalette.InkMuted, fontSize = 11.sp)
       }
 
       Spacer(Modifier.height(16.dp))
@@ -321,8 +344,9 @@ private fun DialogButton(
         .then(
           if (primary) {
             Modifier.graphicsLayer {
-              scaleX = 1f - 0.03f * k
-              scaleY = 1f - 0.03f * k
+              // 同上：按下放大，不缩小。
+              scaleX = 1f + 0.03f * k
+              scaleY = 1f + 0.03f * k
             }
           } else {
             Modifier
@@ -420,7 +444,7 @@ fun FloatingMoreGauge(ratio: Float, onClick: () -> Unit, modifier: Modifier = Mo
 }
 
 /**
- * 聊天页右上角**一块**面板：上面是用量与压缩/裁剪，下面是会话动作。
+ * 聊天页右上角**一块**面板：上面是用量与压缩/长期记忆，下面是会话动作。
  *
  * 用户口径：「更多太啰嗦了吧，而且太大了，根本没有这么多字，你放这么大的空间……还有上下文，
  * 你看怎么样能合并一下」。所以：两面板合一、行高压到 38dp、删掉每条动作下面那行解释
@@ -435,7 +459,6 @@ fun GlassChatPanel(
   windowTokens: Int,
   real: Boolean,
   messageCount: Int,
-  keepRecent: Int,
   summaryChars: Int,
   busy: Boolean,
   /** 「记住这段」正在跑（要一次模型调用，得让用户看得见）。 */
@@ -444,10 +467,13 @@ fun GlassChatPanel(
   rememberHint: String = "",
   modifier: Modifier = Modifier,
   onCompress: () -> Unit,
-  onTrim: (Int) -> Unit,
   onRemember: () -> Unit = {},
   /** 更新日志（更多里的一项）。 */
   onChangelog: () -> Unit = {},
+  /** 「它都有哪些工具」—— 独立一页列出来（用户口径：「工具展示：显示它都有哪些工具」）。 */
+  onTools: () -> Unit = {},
+  /** 「工具」那一行右边的小字：几项已配好 / 共几项。 */
+  toolsHint: String = "",
   onNewChat: () -> Unit,
   onRename: () -> Unit,
   onDelete: () -> Unit,
@@ -460,7 +486,9 @@ fun GlassChatPanel(
     modifier =
       modifier
         .width(248.dp)
-        .floatGlass(shape = shape, strength = 0.55f, elevation = 14.dp)
+        // 面板背后可能是聊天气泡正文。低模糊口径不变，但必须足够把正文从“可读”
+        // 压成“轮廓”，否则透明玻璃会和面板文字叠在一起。
+        .floatGlass(shape = shape, strength = 0.55f, elevation = 14.dp, blurScale = 0.58f)
         // 吃掉落在面板空白处的点击，别让它们穿到底下的 scrim 上把面板关掉。
         .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {}
         .padding(horizontal = 16.dp, vertical = 12.dp),
@@ -506,7 +534,6 @@ fun GlassChatPanel(
         buildString {
           append("$messageCount 条")
           append(" · 剩 ${ai.lotus.app.data.formatTokens((windowTokens - usedTokens).coerceAtLeast(0))}")
-          if (keepRecent > 0) append(" · 只发最近 $keepRecent 条")
           if (summaryChars > 0) append(" · 摘要 ${summaryChars} 字")
           if (warm) append(" · 该压缩了")
         },
@@ -521,12 +548,6 @@ fun GlassChatPanel(
         enabled = !busy && messageCount > 2,
         emphasized = warm,
         onClick = onCompress,
-      )
-      PanelPill(
-        text = if (keepRecent > 0) "取消裁剪" else "裁剪",
-        enabled = !busy,
-        emphasized = false,
-        onClick = { onTrim(if (keepRecent > 0) 0 else 20) },
       )
       PanelPill(
         text = if (rememberBusy) "记忆…" else "记住这段",
@@ -548,13 +569,14 @@ fun GlassChatPanel(
     Spacer(Modifier.height(2.dp))
 
     // ---- 会话动作：一行一个，行高 38dp（原来是 46dp 还带一行解释，太占地方）----
+    PanelRow(if (toolsHint.isBlank()) "工具" else "工具 · $toolsHint", onClick = onTools)
     PanelRow("开新聊天", onClick = onNewChat)
     PanelRow("修改聊天名称", onClick = onRename)
     PanelRow("删除这个会话", onClick = onDelete)
   }
 }
 
-/** 合并面板里的小胶囊动作（压缩 / 裁剪）。 */
+/** 合并面板里的小胶囊动作（压缩 / 记住这段）。 */
 @Composable
 private fun PanelPill(
   text: String,
@@ -564,9 +586,24 @@ private fun PanelPill(
 ) {
   val interaction = remember { MutableInteractionSource() }
   val pressed by interaction.collectIsPressedAsState()
+  // 2026-10-16：以前这里按下只把墨底从 4% 加到 10% —— 那就是"变灰"的老式反馈，
+  // 在白底上几乎看不出来（用户："按了之后没任何反应"）。现在再叠一层**跟手的缩放**：
+  // 按压缩到 0.94、抬手带一点回弹，和全 App 其他按键同一套语言。
+  val pressK by
+    animateFloatAsState(
+      targetValue = if (pressed) 1f else 0f,
+      animationSpec = spring(dampingRatio = 0.45f, stiffness = 900f),
+      label = "panelPillPress",
+    )
   Box(
     modifier =
       Modifier.height(30.dp)
+        .graphicsLayer {
+          // 按下**放大**（用户口径：「往内缩不好看」）。全 App 统一这一条。
+          val sc = 1f + 0.06f * pressK
+          scaleX = sc
+          scaleY = sc
+        }
         .clip(RoundedCornerShape(15.dp))
         .background(LotusPalette.Ink.copy(alpha = if (pressed) 0.10f else if (emphasized) 0.07f else 0.04f))
         .clickable(interactionSource = interaction, indication = null, enabled = enabled) { onClick() }
@@ -674,6 +711,33 @@ fun GlassConfirmDialog(
   }
 }
 
+/** 一闪而过的玻璃确认条：保存 / 归档完成后给一个非阻塞结果。 */
+@Composable
+fun GlassToast(text: String, modifier: Modifier = Modifier) {
+  val shape = RoundedCornerShape(18.dp)
+  Row(
+    modifier =
+      modifier
+        .glassPanel(
+          shape = shape,
+          strength = 0.6f,
+          veil = 1.8f,
+          rimAlpha = 0.9f,
+          elevation = 10.dp,
+        )
+        .padding(horizontal = 16.dp, vertical = 9.dp),
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    LotusIcon(
+      glyph = LotusGlyph.Sparkle,
+      tint = LotusPalette.Ink.copy(alpha = 0.8f),
+      modifier = Modifier.size(14.dp),
+    )
+    Spacer(Modifier.width(7.dp))
+    Text(text = text, color = LotusPalette.Ink, fontSize = 13.sp)
+  }
+}
+
 /**
  * 「+」的小菜单：**竖着排**的图片 / 视频 / 文件。
  *
@@ -723,4 +787,409 @@ private fun AttachRow(text: String, onClick: () -> Unit) {
   ) {
     Text(text = text, color = LotusPalette.Ink, fontSize = 14.sp)
   }
+}
+
+/**
+ * **它都有哪些工具** —— 一页列清楚。
+ *
+ * 用户口径：「1. 工具展示：显示它都有哪些工具。」「不是所有人都跟我用的一样，上游有些能用的
+ * 用、有些不能用的就不用，但是这功能必须要有」。
+ *
+ * 所以这一页**不 promise 任何东西一定可用**：每一项都把自己的真实状态写出来 ——
+ * 常开的（记忆 / 提示词）直接写"常开"，要看上游的写"看上游"，没配的写"未配置"。
+ * 状态全部来自本机真实配置（[Capabilities] + 联网开关），不是写死的装饰。
+ */
+@Composable
+fun GlassToolsPanel(
+  webSearch: Boolean,
+  searchReady: Boolean,
+  imageReady: Boolean,
+  videoReady: Boolean,
+  ocrReady: Boolean,
+  modifier: Modifier = Modifier,
+  onDismiss: () -> Unit,
+) {
+  val shape = RoundedCornerShape(26.dp)
+  val rows =
+    listOf(
+      ToolLine("记忆读取", "每轮请求都带上必读的人设与记忆（USER · MEMORY）", "常开"),
+      ToolLine("记忆写入", "它能把要点写进 MEMORY.md；同一主题整条替换，不会越堆越长", "常开"),
+      ToolLine("提示词文件", "它能改自己的人设 / 规则文件（SOUL · RULES）", "常开"),
+      ToolLine("整理记忆", "它能把写乱的那一段重写整齐，而不是一路往下追加", "常开"),
+      ToolLine(
+        "联网搜索",
+        if (webSearch) "请求里带 web_search 声明，检索在上游做；上游不回页面明细时，聊天里会如实写出来"
+        else "已关闭。开了才能让模型自己上网",
+        when {
+          !webSearch -> "已关"
+          else -> "看上游"
+        },
+      ),
+      ToolLine(
+        "搜索源",
+        if (searchReady) "备用搜索服务已填（Tavily 这类固定接口）。自动调用还没接上，先只做备用"
+        else "没配。模型自己不带联网时，这里是它的备用搜索服务",
+        if (searchReady) "已配" else "未配置",
+      ),
+      ToolLine("生图", "配好接口 + key + 模型，就能在对话里直接出图", if (imageReady) "已配" else "未配置"),
+      ToolLine("生视频", "文生视频 / 图生视频", if (videoReady) "已配" else "未配置"),
+      ToolLine("解析器", "连视觉都没有的模型：先把图 / 文档里的字抠出来再喂给它", if (ocrReady) "已配" else "未配置"),
+      ToolLine("视觉理解", "模型自己就能看图（发图前会先判断这一条支不支持）", "看上游"),
+    )
+
+  Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+    Box(
+      modifier =
+        Modifier.fillMaxSize()
+          .background(Color.Black.copy(alpha = ModalScrimAlpha))
+          .clickable(
+            interactionSource = remember { MutableInteractionSource() },
+            indication = null,
+          ) { onDismiss() }
+    )
+    Column(
+      modifier =
+        Modifier.padding(horizontal = 22.dp)
+          .fillMaxWidth()
+          .floatGlass(
+            shape = shape,
+            strength = 0.7f,
+            elevation = 18.dp,
+            dim = ModalGlassDim,
+          )
+          .padding(horizontal = 18.dp, vertical = 16.dp)
+          .verticalScroll(rememberScrollState()),
+    ) {
+      Text("工具", color = LotusPalette.Ink, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+      Spacer(Modifier.height(2.dp))
+      Text(
+        "这些是它现在能用的全部能力。用什么、能不能用，取决于你配的提供方。",
+        color = LotusPalette.InkMuted,
+        fontSize = 11.sp,
+        lineHeight = 16.sp,
+      )
+      Spacer(Modifier.height(12.dp))
+      rows.forEach { line ->
+        Row(verticalAlignment = Alignment.Top, modifier = Modifier.padding(vertical = 6.dp)) {
+          Column(modifier = Modifier.weight(1f)) {
+            Text(line.name, color = LotusPalette.Ink, fontSize = 13.sp)
+            Spacer(Modifier.height(2.dp))
+            Text(line.detail, color = LotusPalette.InkMuted, fontSize = 10.5.sp, lineHeight = 15.sp)
+          }
+          Spacer(Modifier.width(10.dp))
+          Text(
+            text = line.state,
+            color = LotusPalette.Ink.copy(alpha = 0.5f),
+            fontSize = 10.sp,
+            modifier = Modifier.padding(top = 2.dp),
+          )
+        }
+      }
+      Spacer(Modifier.height(14.dp))
+      DialogButton(text = "好", primary = true, modifier = Modifier.fillMaxWidth()) { onDismiss() }
+    }
+  }
+}
+
+private data class ToolLine(val name: String, val detail: String, val state: String)
+
+/** 来源玻璃上的文字柔光：不靠白底板，也能压在背景纹理上读清。 */
+private val SourceTextGlow =
+  Shadow(color = Color.White.copy(alpha = 0.94f), offset = Offset.Zero, blurRadius = 8f)
+private val SourceGlowStyle = TextStyle(shadow = SourceTextGlow)
+
+/**
+ * **来源列表** —— 点消息底下那枚站点图标弹出来的半屏。
+ *
+ * 用户口径（2026-10-17，对着 GPT 的截图）：「点开之后可以做成这样」。
+ * 所以：不直接跳网页，先列清楚都用过哪些页面 —— 站点图标 / 站点名 / 标题 / 地址 / 日期；
+ * 点其中一条才进 [ai.lotus.app.ui.reader.ReaderScreen]（应用内）。
+ *
+ * 标题是**真去抓页面 <title>**（抓不到就退回 URL 路径），不是编的。
+ */
+@Composable
+fun GlassSourcesSheet(
+  urls: List<String>,
+  onOpen: (String) -> Unit,
+  onDismiss: () -> Unit,
+) {
+  val shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+  val listState = rememberLazyListState()
+
+  Box(modifier = Modifier.fillMaxSize()) {
+    Box(
+      modifier =
+        Modifier.fillMaxSize()
+          .background(Color.Black.copy(alpha = 0.16f))
+          .clickable(
+            interactionSource = remember { MutableInteractionSource() },
+            indication = null,
+          ) { onDismiss() }
+    )
+    Column(
+      modifier =
+        Modifier.align(Alignment.BottomCenter)
+          .fillMaxWidth()
+          .floatGlass(
+            shape = shape,
+            strength = 0.78f,
+            elevation = 24.dp,
+            veil = 1.08f,
+            dim = ModalGlassDim,
+          )
+          .padding(horizontal = 18.dp)
+          .padding(top = 10.dp, bottom = 18.dp)
+    ) {
+      Box(
+        modifier =
+          Modifier.align(Alignment.CenterHorizontally)
+            .width(38.dp)
+            .height(4.dp)
+            .clip(RoundedCornerShape(2.dp))
+            .background(LotusPalette.Ink.copy(alpha = 0.14f))
+      )
+      Spacer(Modifier.height(14.dp))
+      Text(
+        text = "来源",
+        color = LotusPalette.Ink,
+        fontSize = 16.sp,
+        fontWeight = FontWeight.Medium,
+        style = SourceGlowStyle,
+      )
+      Spacer(Modifier.height(4.dp))
+      Text(
+        text = "${urls.size} 个页面",
+        color = LotusPalette.InkFaint,
+        fontSize = 10.sp,
+        style = SourceGlowStyle,
+      )
+      Spacer(Modifier.height(8.dp))
+      LazyColumn(state = listState, modifier = Modifier.heightIn(max = 560.dp)) {
+        items(urls) { url ->
+          SourceSheetRow(url = url, onClick = { onOpen(url) })
+          Box(
+            Modifier.fillMaxWidth().height(0.7.dp)
+              .background(LotusPalette.Ink.copy(alpha = 0.075f))
+          )
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun SourceSheetRow(url: String, onClick: () -> Unit) {
+  val domain = ai.lotus.app.ui.chat.hostOf(url)
+  val favicon = ai.lotus.app.ui.chat.rememberFavicon(domain)
+  val meta = rememberPageMeta(url)
+  val press = rowPress(RoundedCornerShape(12.dp), scale = 1.012f, strength = 0.24f)
+  val publisher = meta?.siteName?.takeIf { it.isNotBlank() } ?: domain
+
+  Column(
+    modifier =
+      Modifier.fillMaxWidth()
+        .then(press.modifier)
+        .clickable(interactionSource = press.interaction, indication = null, onClick = onClick)
+        .padding(vertical = 13.dp),
+  ) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      Box(
+        modifier =
+          Modifier.size(24.dp).clip(RoundedCornerShape(6.dp)),
+        contentAlignment = Alignment.Center,
+      ) {
+        if (favicon != null) {
+          Image(
+            bitmap = favicon,
+            contentDescription = null,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.size(21.dp).clip(RoundedCornerShape(5.dp)),
+          )
+        } else {
+          Box(
+            modifier =
+              Modifier.size(22.dp).clip(RoundedCornerShape(6.dp))
+                .background(LotusPalette.Ink.copy(alpha = 0.07f)),
+            contentAlignment = Alignment.Center,
+          ) {
+            LotusIcon(LotusGlyph.Link, LotusPalette.Ink.copy(alpha = 0.46f), Modifier.size(13.dp))
+          }
+        }
+      }
+      Spacer(Modifier.width(9.dp))
+      Text(
+        text = publisher,
+        color = LotusPalette.InkMuted,
+        fontSize = 10.5.sp,
+        style = SourceGlowStyle,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+    }
+    Spacer(Modifier.height(7.dp))
+    Text(
+      text = meta?.title ?: pathOf(url),
+      color = LotusPalette.Ink,
+      fontSize = 14.5.sp,
+      lineHeight = 20.sp,
+      fontWeight = FontWeight.Medium,
+      style = SourceGlowStyle,
+      maxLines = 2,
+      overflow = TextOverflow.Ellipsis,
+    )
+    meta?.description?.takeIf { it.isNotBlank() }?.let { summary ->
+      Spacer(Modifier.height(4.dp))
+      Text(
+        text = summary,
+        color = LotusPalette.InkMuted,
+        fontSize = 11.5.sp,
+        lineHeight = 17.sp,
+        style = SourceGlowStyle,
+        maxLines = 3,
+        overflow = TextOverflow.Ellipsis,
+      )
+    }
+    meta?.published?.takeIf { it.isNotBlank() }?.let { date ->
+      Spacer(Modifier.height(6.dp))
+      Text(
+        text = date,
+        color = LotusPalette.InkFaint,
+        fontSize = 9.5.sp,
+        style = SourceGlowStyle,
+        maxLines = 1,
+      )
+    }
+  }
+}
+
+/** URL 的路径部分，作为拿不到标题时的兜底。 */
+private fun pathOf(url: String): String =
+  runCatching {
+      val u = java.net.URI(url)
+      val p = u.path.orEmpty().trimEnd('/')
+      if (p.isBlank()) u.host ?: url else p
+    }
+    .getOrDefault(url)
+
+private data class PageMeta(
+  val title: String?,
+  val description: String?,
+  val published: String?,
+  val siteName: String?,
+)
+
+/** 进程内缓存：同一个页面只抓一次标题 / 摘要 / 日期。 */
+private val pageMetaCache = mutableMapOf<String, PageMeta?>()
+
+/**
+ * 只读页面头部 64KB，提取真实标题、摘要、发布时间和站点名。
+ * 拿不到就返回 null / 空字段，绝不编内容。
+ */
+@Composable
+private fun rememberPageMeta(url: String): PageMeta? {
+  var meta by remember(url) { mutableStateOf(pageMetaCache[url]) }
+  LaunchedEffect(url) {
+    if (pageMetaCache.containsKey(url)) {
+      meta = pageMetaCache[url]
+      return@LaunchedEffect
+    }
+    val got =
+      withContext(Dispatchers.IO) {
+        runCatching {
+            val conn =
+              (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
+                connectTimeout = 4500
+                readTimeout = 4500
+                instanceFollowRedirects = true
+                setRequestProperty("User-Agent", "Mozilla/5.0 (Lotus)")
+                setRequestProperty("Accept", "text/html,application/xhtml+xml")
+              }
+            val html = conn.inputStream.use { it.bufferedReader().readText().take(65_536) }
+            conn.disconnect()
+            parsePageMeta(html)
+          }
+          .getOrNull()
+      }
+    pageMetaCache[url] = got
+    meta = got
+  }
+  return meta
+}
+
+private fun parsePageMeta(html: String): PageMeta {
+  val title =
+    Regex("""<title[^>]*>(.*?)</title>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+      .find(html)
+      ?.groupValues
+      ?.get(1)
+      ?.cleanHtml()
+      ?.takeIf { it.isNotBlank() }
+
+  val attrs =
+    Regex("""<meta\b[^>]*>""", RegexOption.IGNORE_CASE)
+      .findAll(html)
+      .mapNotNull { match ->
+        val tag = match.value
+        val key =
+          attrOf(tag, "property")
+            ?: attrOf(tag, "name")
+            ?: attrOf(tag, "itemprop")
+        val content = attrOf(tag, "content")
+        if (key.isNullOrBlank() || content.isNullOrBlank()) null else key.lowercase() to content.cleanHtml()
+      }
+      .toList()
+      .toMap()
+
+  val description =
+    listOf("og:description", "description", "twitter:description")
+      .firstNotNullOfOrNull { attrs[it]?.takeIf(String::isNotBlank) }
+
+  val rawDate =
+    listOf(
+        "article:published_time",
+        "datepublished",
+        "date",
+        "pubdate",
+        "og:updated_time",
+      )
+      .firstNotNullOfOrNull { attrs[it]?.takeIf(String::isNotBlank) }
+      ?: Regex("""["']datePublished["']\s*:\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+        .find(html)
+        ?.groupValues
+        ?.get(1)
+
+  return PageMeta(
+    title = title,
+    description = description,
+    published = prettyDate(rawDate),
+    siteName = attrs["og:site_name"]?.takeIf { it.isNotBlank() },
+  )
+}
+
+private fun attrOf(tag: String, name: String): String? =
+  Regex("""\b${Regex.escape(name)}\s*=\s*["']([^"']*)["']""", RegexOption.IGNORE_CASE)
+    .find(tag)
+    ?.groupValues
+    ?.get(1)
+    ?.cleanHtml()
+
+private fun String.cleanHtml(): String =
+  replace(Regex("<[^>]+>"), " ")
+    .replace("&amp;", "&")
+    .replace("&quot;", "\"")
+    .replace("&#39;", "'")
+    .replace("&nbsp;", " ")
+    .replace("&lt;", "<")
+    .replace("&gt;", ">")
+    .replace(Regex("""\s+"""), " ")
+    .trim()
+
+private fun prettyDate(raw: String?): String? {
+  if (raw.isNullOrBlank()) return null
+  val head = raw.take(10)
+  return runCatching {
+      val date = java.time.LocalDate.parse(head)
+      "${date.year}年${date.monthValue}月${date.dayOfMonth}日"
+    }
+    .getOrElse { raw.take(10).takeIf { it.matches(Regex("""\d{4}[-/]\d{1,2}[-/]\d{1,2}""")) } }
 }

@@ -13,7 +13,6 @@ object AppPrefs {
   private const val KeyAssistantName = "assistantName"
   private const val KeyPromptEnabled = "promptEnabled"
   private const val KeyMemoryEnabled = "memoryEnabled"
-  private const val KeyContextTurns = "contextTurns"
   private const val KeyWebSearch = "webSearchEnabled"
   private const val KeyAutoMemory = "autoMemoryEnabled"
   private const val KeyFullMemory = "fullMemoryEnabled"
@@ -22,6 +21,7 @@ object AppPrefs {
   private const val KeyShowTime = "showTime"
   private const val KeyShowTokens = "showTokens"
   private const val KeyShowChars = "showChars"
+  private const val KeyOnboardingCompleted = "onboardingCompleted"
 
   /** 助手显示名。空 = 用户清空了输入框，显示时回退到 [DefaultAssistantName]。 */
   fun assistantName(context: Context): String =
@@ -29,6 +29,19 @@ object AppPrefs {
 
   fun setAssistantName(context: Context, value: String) {
     prefs(context).edit().putString(KeyAssistantName, value).apply()
+  }
+
+  /**
+   * 是否完成首次启动初始化。
+   *
+   * 只在初始化真的写入本机配置后置 true。用户之后清应用数据，会重新走一遍；
+   * 不把它藏进 providers.json —— 否则删提供方时会把“已完成”一起弄丢。
+   */
+  fun onboardingCompleted(context: Context): Boolean =
+    prefs(context).getBoolean(KeyOnboardingCompleted, false)
+
+  fun setOnboardingCompleted(context: Context, value: Boolean) {
+    prefs(context).edit().putBoolean(KeyOnboardingCompleted, value).apply()
   }
 
   // ---- 提示词 / 记忆：开不开、带多少 ----
@@ -48,16 +61,8 @@ object AppPrefs {
     prefs(context).edit().putBoolean(KeyMemoryEnabled, value).apply()
   }
 
-  /**
-   * 默认每次最多带最近几条消息。0 = 不限制（全带）。
-   *
-   * 这是"省 token"最有效的那个旋钮：会话越长，不限制就越贵。用户自己定，App 不偷改。
-   */
-  fun contextTurns(context: Context): Int = prefs(context).getInt(KeyContextTurns, 0)
-
-  fun setContextTurns(context: Context, value: Int) {
-    prefs(context).edit().putInt(KeyContextTurns, value.coerceAtLeast(0)).apply()
-  }
+  // ⚠️ 2026-10-16 删掉了「默认每次最多带最近几条消息」（= 裁剪上下文）。
+  //    用户口径：「裁剪那个功能没用…裁缺不如直接开个新的聊天框」。请求里从此永远带全部消息。
 
   /**
    * 联网搜索开关。**默认关**。
@@ -82,17 +87,13 @@ object AppPrefs {
    * 关掉后：协议不再注入，模型不会写标记；手动那个「记住这段」按钮**照旧可用**。
    */
   /**
-   * 「全量记忆」：每轮把 USER.md + MEMORY.md 全文都带上。
+   * 「全量记忆」：每轮把 IDENTITY / SOUL / AGENTS / USER / MEMORY 全文都带上。
    *
-   * ⚠️ **默认关**。开着 = 每轮固定多花几百到几千 token（记忆越写越多、越来越贵）；
-   * 关着 = 只带热指针，AI 需要时自己写 `<!--recall: …-->` 去取（见 Prompts.RecallProtocol）。
+   * ⚠️ 2026-10-16 起**恒定开启**，不再是开关。
+   * 用户口径：「以后不要热插拔了，就走全量，给全部提示词。这样才能让他看到记忆。」
+   * 所以这里恒为 true —— 热指针 / `<!--recall-->` 按需检索那条路已废弃，不再走。
    */
-  fun fullMemoryEnabled(context: Context): Boolean =
-    prefs(context).getBoolean(KeyFullMemory, false)
-
-  fun setFullMemoryEnabled(context: Context, value: Boolean) {
-    prefs(context).edit().putBoolean(KeyFullMemory, value).apply()
-  }
+  fun fullMemoryEnabled(context: Context): Boolean = true
 
   fun autoMemoryEnabled(context: Context): Boolean =
     prefs(context).getBoolean(KeyAutoMemory, true)

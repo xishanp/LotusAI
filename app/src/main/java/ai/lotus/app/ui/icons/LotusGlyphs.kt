@@ -84,6 +84,10 @@ enum class LotusGlyph {
   Quote,
   /** ✎ 编辑 */
   Edit,
+  /** ✓ 复制完成 */
+  Check,
+  /** ↗ 外链 / 消息来源 */
+  Link,
 }
 
 @Composable
@@ -120,8 +124,10 @@ fun LotusIcon(glyph: LotusGlyph, tint: Color, modifier: Modifier = Modifier) {
       LotusGlyph.Eye -> drawEye(w, h, tint, stroke)
       LotusGlyph.Refresh -> drawRefresh(w, h, tint, stroke)
       LotusGlyph.Copy -> drawCopy(w, h, tint, stroke)
-      LotusGlyph.Quote -> drawQuote(w, h, tint)
+      LotusGlyph.Quote -> drawQuote(w, h, tint, stroke)
       LotusGlyph.Edit -> drawEdit(w, h, tint, stroke)
+      LotusGlyph.Check -> drawCheck(w, h, tint, stroke)
+      LotusGlyph.Link -> drawLink(w, h, tint, stroke)
     }
   }
 }
@@ -443,22 +449,24 @@ private fun DrawScope.drawEye(w: Float, h: Float, c: Color, s: Stroke) {
 
 /** 循环箭头（获取 / 刷新）。 */
 private fun DrawScope.drawRefresh(w: Float, h: Float, c: Color, s: Stroke) {
+  // 大半个圆 + 一枚实心箭头，接在圆的右上缺口上。小尺寸下比细线箭头清楚得多。
   drawArc(
     color = c,
-    startAngle = -50f,
-    sweepAngle = 300f,
+    startAngle = -55f,
+    sweepAngle = 295f,
     useCenter = false,
-    topLeft = Offset(0.12f * w, 0.12f * h),
-    size = Size(0.76f * w, 0.76f * h),
+    topLeft = Offset(0.16f * w, 0.16f * h),
+    size = Size(0.68f * w, 0.68f * h),
     style = s,
   )
   val head =
     Path().apply {
-      moveTo(0.52f * w, 0.02f * h)
-      lineTo(0.80f * w, 0.22f * h)
-      lineTo(0.50f * w, 0.34f * h)
+      moveTo(0.58f * w, 0.06f * h)
+      lineTo(0.88f * w, 0.24f * h)
+      lineTo(0.56f * w, 0.40f * h)
+      close()
     }
-  drawPath(head, c, style = s)
+  drawPath(head, c)
 }
 
 private fun DrawScope.drawMore(w: Float, h: Float, c: Color) {
@@ -482,6 +490,7 @@ private fun DrawScope.drawTune(w: Float, h: Float, c: Color, s: Stroke) {
   }
 }
 
+
 private fun DrawScope.drawCopy(w: Float, h: Float, c: Color, s: Stroke) {
   // 后面那张纸（只画露出来的 L 形）+ 前面那个完整圆角框。
   val r = CornerRadius(0.10f * w, 0.10f * w)
@@ -501,22 +510,23 @@ private fun DrawScope.drawCopy(w: Float, h: Float, c: Color, s: Stroke) {
   )
 }
 
-private fun DrawScope.drawQuote(w: Float, h: Float, c: Color) {
-  // 两个并排的实心小逗号（引号）。
-  listOf(0.32f, 0.68f).forEach { x ->
-    val p =
-      Path().apply {
-        moveTo((x - 0.13f) * w, 0.28f * h)
-        lineTo((x + 0.13f) * w, 0.28f * h)
-        lineTo((x + 0.13f) * w, 0.56f * h)
-        quadraticTo((x + 0.13f) * w, 0.74f * h, (x - 0.13f) * w, 0.74f * h)
-        lineTo((x - 0.13f) * w, 0.62f * h)
-        quadraticTo((x - 0.01f) * w, 0.62f * h, (x - 0.01f) * w, 0.50f * h)
-        lineTo((x - 0.13f) * w, 0.50f * h)
-        close()
-      }
-    drawPath(p, c)
-  }
+private fun DrawScope.drawQuote(w: Float, h: Float, c: Color, s: Stroke) {
+  // 引用 = 回复箭头：一个拐下去再向左的弯 + 箭头。比两个小逗号好认，14dp 下也立得住。
+  val p =
+    Path().apply {
+      moveTo(0.84f * w, 0.74f * h)
+      lineTo(0.84f * w, 0.46f * h)
+      quadraticTo(0.84f * w, 0.26f * h, 0.64f * w, 0.26f * h)
+      lineTo(0.26f * w, 0.26f * h)
+    }
+  drawPath(p, c, style = s)
+  val head =
+    Path().apply {
+      moveTo(0.44f * w, 0.08f * h)
+      lineTo(0.20f * w, 0.26f * h)
+      lineTo(0.44f * w, 0.44f * h)
+    }
+  drawPath(head, c, style = s)
 }
 
 private fun DrawScope.drawEdit(w: Float, h: Float, c: Color, s: Stroke) {
@@ -524,4 +534,36 @@ private fun DrawScope.drawEdit(w: Float, h: Float, c: Color, s: Stroke) {
   drawLine(c, Offset(0.28f * w, 0.72f * h), Offset(0.76f * w, 0.24f * h), s.width, StrokeCap.Round)
   drawLine(c, Offset(0.24f * w, 0.64f * h), Offset(0.32f * w, 0.80f * h), s.width, StrokeCap.Round)
   drawLine(c, Offset(0.20f * w, 0.80f * h), Offset(0.36f * w, 0.76f * h), s.width, StrokeCap.Round)
+}
+
+private fun DrawScope.drawCheck(w: Float, h: Float, c: Color, s: Stroke) {
+  // 一个勾。压在"复制"那枚图标上时，两笔要重合得看起来像同一枚图标换了状态。
+  val p =
+    Path().apply {
+      moveTo(0.22f * w, 0.54f * h)
+      lineTo(0.42f * w, 0.74f * h)
+      lineTo(0.80f * w, 0.28f * h)
+    }
+  drawPath(p, c, style = s)
+}
+
+private fun DrawScope.drawLink(w: Float, h: Float, c: Color, s: Stroke) {
+  // 外链：一个缺右上角的方框 + 一支朝右上出去的箭头。
+  val box =
+    Path().apply {
+      moveTo(0.58f * w, 0.20f * h)
+      lineTo(0.24f * w, 0.20f * h)
+      lineTo(0.24f * w, 0.78f * h)
+      lineTo(0.80f * w, 0.78f * h)
+      lineTo(0.80f * w, 0.46f * h)
+    }
+  drawPath(box, c, style = s)
+  drawLine(c, Offset(0.50f * w, 0.50f * h), Offset(0.80f * w, 0.20f * h), s.width, StrokeCap.Round)
+  val head =
+    Path().apply {
+      moveTo(0.60f * w, 0.15f * h)
+      lineTo(0.86f * w, 0.14f * h)
+      lineTo(0.85f * w, 0.40f * h)
+    }
+  drawPath(head, c, style = s)
 }

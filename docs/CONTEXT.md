@@ -413,3 +413,197 @@ filesDir/md/
 - **图片附件没接进请求**：`LotusApp` 里的 `attachment` 只有选图 UI，`requestTurns()` 里
   根本没用它。要么接上（OpenAI 兼容的 `image_url` + base64），要么把 `+` 收起来 ——
   现在这样点选图是**没有效果**的，已在能力边界里如实说明。
+
+## 🔒 锁定的底栏基线 —— "真玻璃"（2026-10-16 晚）
+
+用户原话：「是真玻璃」「保留这一版 并标为重点」「把其他可能会造成污染的不重要的版本删除」。
+
+**锁定的实现**（`ui/nav/LotusBottomBar.kt`，顶部有同样的锁定注释）：
+玻璃泡 = **一层** `drawBackdrop(backdrop = rememberCombinedBackdrop(页面背景, 图标层))`，
+effects **只有** `lens((4dp + 10dp·p), (6dp + 14dp·p), chromaticAberration = true)`；静止基线 4dp/6dp（2026-10-16 二次修订：原来 p=0 时折射为 0，被用户判成「塑料板」）；
+无 blur、无 vibrancy、无霜面；静止态 6% 墨，按下褪到 0。
+
+**逐字备份**：`output/golden/LotusBottomBar.LOCKED-2026-10-16.kt`
+（回滚：`cp output/golden/LotusBottomBar.LOCKED-2026-10-16.kt app/src/main/java/ai/lotus/app/ui/nav/LotusBottomBar.kt`）
+**基线外观**：`output/golden/baseline-pressed-真玻璃.png`（设置页按住第三个 tab 的实拍）。
+
+**当晚逐条试错、已被用户否掉、不许重试**：
+1. 采样里拼 `barBackdrop`（外栏导出底座）→「这一版的玻璃又没了」——底座是白的，折白＝白。
+2. 泡裁进外栏胶囊 / 最上层补一道边光 →「全是 bug，而且还给它故意描边了」。
+3. 给泡加 blur（哪怕"再糊一遍"）→ 二次模糊，长按成毛玻璃。
+4. 把外栏底座改到泡上面画（调绘制顺序）→「这一版都有 bug」。
+
+**未解**：用户说"底座没有真正显示进去"——目前为止 4 条路子全错，没有正确解法在案；再动手前必须先问。
+
+---
+
+## 🔒 v2：三层玻璃泡 —— 底栏玻璃的收官版（2026-10-16 深夜）
+
+**v1（单层、只有折射）已判为 bug 版并出局**：`output/golden/LotusBottomBar.LOCKED-2026-10-16.kt`
+与 `baseline-pressed-真玻璃.png` 已移入废纸篓 `~/.Trash/lotus-bottom-bar-v1-old-golden/`。
+出局原因（用户原话）：「你上一版本把底栏的图标给覆盖掉了，导致看起来像是在一块玻璃后面」。
+
+### 症状 → 根因（两条，都是**采样源**的问题，不是参数问题）
+
+1. 「背景只有折射没有模糊」／「把图标覆盖掉了」
+   - 把 `blur(2.6dp)` 加在**同一层采样**上 ⇒ 采样源是 `底色+页面+图标` 的合集，
+     一糊**连选中的图标一起糊**。实测对照图 `output/verify/dock_ab.png` 上半张：
+     泡里的气泡图标明显发虚，旁边没被泡盖住的文件夹/齿轮是清晰的。
+2. 「长按背景不折射，只有里面的东西折射，外面的东西不折射」
+   - 泡的采样是 `combined(底色, 页面, 图标)`，**唯独不含底栏自己**。
+     外栏画在泡**旁边另一棵树**上（`GlassBackground` 的 content 槽），泡根本看不见它。
+
+### 解法：把"糊谁"和"折谁"拆成三层（同一块玻璃、同一几何、同一 `pillLayerBlock`）
+
+| 层 | 采样源 | effects | 作用 |
+| --- | --- | --- | --- |
+| 底层 | `backdrop`（底色+页面） | `blur(2.6dp)` + `lens((6+14p)dp,(9+20p)dp, 色散)` + 静止 6% 墨 | 静态模糊 |
+| 中层 | `barShellBackdrop`（外栏**面+边**，**不含图标**） | 只 `lens` | 长按把"底座"折进泡里 |
+| 顶层 | `tabsBackdrop`（图标） | 只 `lens` | 图标永远清晰 |
+
+- `barShellBackdrop` 的录法：把外栏的 `veil + glassRim` 按同样几何再画一遍，
+  `.alpha(0f)` 写在 `.layerBackdrop()` **之前**（顺序反了录进去就是全透明 —— 和 Glass.kt
+  里 `background` 必须写在 `layerBackdrop` **之内**是同一条机制）。
+- ⚠️ 三层必须是**兄弟节点**，各自挂 `pillLayerBlock`。套成父子会让 `layerBlock` 的
+  graphicsLayer 作用到子节点、`-offset` 补偿只抵消自己那份 ⇒ 图标被按着泡心整体放大位移
+  （历史 bug：「加粗的图标乱跳 / 底栏下面凭空多出一枚图标」）。
+- 实测（模拟器 1080×2400，按住第三个 tab）：底座被折进泡里、页面文字在泡内糊成柔雾、
+  三枚图标保持清晰。基线图 `output/golden/baseline-v2-{rest,pressed}.png`。
+- **遗留**：用户口径「背景是有模糊了 但是折射还是不够」⇒ 下一步只动 `lens` 的**按下**项，
+  静止 6/9dp 别动（那档是用户认可的基线折射）。
+
+---
+
+## 🔒 v3：照上游逐行对齐 —— 底栏玻璃的真正解法（2026-10-16 深夜）
+
+**已拉上游源码对过**：`Kyant0/AndroidLiquidGlass`（Apache-2.0），默认分支 `kmp`，
+`app/src/commonMain/kotlin/com/kyant/backdrop/catalog/components/LiquidBottomTabs.kt`。
+
+### 上游的真相（三个节点）
+
+| 节点 | 上游写法 | 作用 |
+| --- | --- | --- |
+| ① 外栏（可见） | `drawBackdrop(页面){vibrancy();blur(8dp);lens(24,24)}` + 表面色 + 图标 | 底栏本身 |
+| ② 折射源（`alpha(0)`+`layerBackdrop`） | **整条底栏的玻璃再画一遍**（`vibrancy();blur();lens(24dp·p)`）+ 表面色，**图标画在玻璃之上**，链尾 `ColorFilter.tint` 只染图标 | 录进 `tabsBackdrop` 的纹理 = **糊过的底 + 清晰的图标** |
+| ③ 玻璃泡 | `drawBackdrop(combined(页面, ②)){lens(10dp·p,14dp·p,色散)}` + highlight/shadow/innerShadow·p + 表面 10% 黑·(1-p) | 只折，不糊 |
+
+### 我们错在哪（本轮全部答案）
+
+1. **我们的 ② 只录了图标**（没画那层玻璃）⇒ 泡里**没有模糊**、只剩图标。
+   用户口径「背景只有折射没有模糊」就是这么来的。
+2. 为了补模糊，把 `blur` 加到 **③ 泡自己**那层 ⇒ 一糊**连图标一起糊**
+   （用户：「把底栏的图标给覆盖掉了，导致看起来像是在一块玻璃后面」）。
+   实测对照图 `output/verify/dock_ab.png` 上半张。
+3. 中途还自创过"外栏外壳层"（把外栏的面 veil + 边 rim 录进泡）⇒ 泡里糊上一层灰罩，
+   用户：「被某行代码的灰色给盖住了，字体包括底栏那些全部显示不出来」。**已删**。
+4. 「泡的上下两面粘齿轮残片」= 采样源**纹理比泡小**。当时 ③ 只采样 ②（或图标层），
+   lens 往边缘外采样直接采到纹理边界残留。上游采样 `combined(页面, ②)`，
+   **页面那半是全屏的**，永远有像素可采 ⇒ 残片消失。实拍对照：
+   `output/verify/v3_press_pill_zoom.png`（坏）对比 `output/verify/v8_set_press.png`（好）。
+
+### 落地结果（模拟器实拍，`output/verify/v8_*.png`）
+
+- 长按 → 泡放大、边缘出现色散彩边、**上下两面不再有残片**；图标全程清晰。
+- 拖动换 tab 正常（`v8_drag_dock.png`）。
+- ⚠️ 首页是纯白底 ⇒ 泡里"没有东西可折"，这一点是物理事实，不是 bug；
+  设置页/文件页/聊天页有内容时，泡里折的就是那层"糊过的底"。
+
+### ✅ 用户确认为默认基线（2026-10-16 深夜）
+
+用户口径：「对，就这一版，把它作为默认的（基线）」。
+
+- 当前 `ui/nav/LotusBottomBar.kt` **逐字等于** `output/golden/LotusBottomBar.LOCKED-v3-2026-10-16.kt`。
+- 任何新改动必须先复制一份 golden 备份，改坏了直接 `cp` 回来。
+- ⛔ 泡的 `lens` 参数（静止 4dp/6dp、按下 4+10p / 6+14p）**不许再动**：
+  实测调大到 6+12p/9+18p 会立刻出现「残影圈」，用户已否。
+
+## 🧪 底栏折射源实验 E1 / E2（2026-10-16 深夜，均已回退）
+
+用户口径：「长按玻璃里最右边的底栏你以为显示出来了，但是上面和下面没有 —— 那头像有没有真正显示出来」。
+
+### v3 的实拍定量结论（`output/verify/s1_press_settings_zoom.png`）
+
+在设置页长按设置格放大后：
+- 球内**能看到**页面文字的模糊残余（"对话设置""头像 · 显示项"的字形被折进来）；
+- 球内**看不到**底座的上下边缘 —— 根因确切：折射源 ② 的底栏副本 `height = InnerHeight(50dp)`
+  **比真实底栏 `BarHeight(60dp)` 矮 10dp**，而且 ② **没有画 rim（边）**。
+  球按下后高约 72dp，上下各超出 ② 副本 10dp 以上 ⇒ 那两块采到的是纯白页面；
+  底座本身又是浅色玻璃，与白底没有对比 ⇒ 上下两面"什么也看不出"。
+- 所以严格说：页面内容只是"糊着透进来一点"，**没有真正清晰显示**。
+
+### E1（有效，未采纳）
+
+② 改成与 ① 同高（`BarHeight`）并补 `.glassRim(shape = barShape, alpha = 0.85f)`。
+实测 `output/verify/E1_press_chat_zoom.png`：球内出现一条**完整的底座下边弧线**（从球左贯到球右），
+页面文字依然可见。底座上下边第一次读得出来。→ 这是目前唯一走对的方向。
+
+### E2（失败，已删）
+
+在 ② 上加 `graphicsLayer { scaleX = 0.92f; scaleY = 0.92f }`（试图让副本"缩小一圈"）。
+实测 `output/verify/E2_press_chat_zoom.png`：**球变成一块不透明白圆**，折射/模糊/底座全丢。
+原因：缩放挂在 `layerBackdrop` 内层，破坏了录制层的内容/裁剪。**这条路不要再走。**
+
+### E3a（未编译即被否）
+
+把 ② 的 `glassVeilBrush(scale = 0.55f)` 减淡 —— 未实测。
+
+### 🔬 E5 / E4a（2026-10-16 深夜）
+
+**用户口径**：「静止状态下右边那一块都不透，再查查源码啥原因」。
+
+**源码层原因（确定）**：③ 泡的采样源是 `combined(页面, ②)`，而 ② 是一层**不透明**的玻璃
+（`vibrancy + blur + 霜面` 把页面整片盖住）⇒ 泡内根本采不到真背景；再叠 ③ 自己那层
+静止 6% 墨，泡永远比周围底栏暗一档 ⇒ 观感就是「不透 / 一块实心板」。
+
+| 实验 | 改法 | 结果 |
+| --- | --- | --- |
+| **E4a** | ② 链上加 `graphicsLayer { alpha = 0.62f }`（让副本半透明，页面透出 38%） | 泡没有更透（页面本来就是白），**图标一起被染淡** ⇒ 副作用，已撤 `output/verify/G0_ball_x3.png` |
+| **E5** | ③ 静止墨 `0.06 → 0.025` | 泡与周围底栏亮度拉平，泡内开始读得出页面文字 `output/verify/H0_rest_settings_ball_x3.png` |
+
+**当前源码状态 = E1 + E5**（候选备份 `output/golden/LotusBottomBar.CAND-E1E5-2026-10-16.kt`）：
+- E1：② 与 ① 同高（`BarHeight`）+ `.glassRim(0.85f)`
+- E5：③ 静止墨 0.025
+- 回退到基线：`cp output/golden/LotusBottomBar.LOCKED-v3-2026-10-16.kt app/src/main/java/ai/lotus/app/ui/nav/LotusBottomBar.kt`
+
+### 🔬 E6 / E8（2026-10-16 深夜）—— 「把上下两边做成跟左右两边一样」
+
+**用户口径**：「这次怎么有点卡卡的感觉」「左右两边都能有折射，上下照左右那一下做不就可以了」。
+
+| 实验 | 改法 | 理由 |
+| --- | --- | --- |
+| **E6** | ② 的 `glassRim(..., spectrum = 0f)` | `glassRim` 默认多画一圈 `sweepGradient` 光谱描边；② 是每帧录制的折射源，那圈既会被 lens 折掉、又白烧一份渐变 ⇒ 卡顿来源。关掉光谱只留纯色边 |
+| **E8** | ② 高度 `60dp → InnerHeight(50dp)`，**保留 rim** | 边线落点决定可见度：② =60dp 时边线落在离球顶/底 6.25dp（8.6%），正好压在 lens 折射最强的一圈里被扯没；② =50dp 时落在 11.25dp（15%），落在球内可读的位置。同时少录 10dp 少一点开销 |
+
+**结论**：上下两缘现在都能折出和左右端同类的边缘折射（色散彩边），实拍
+`output/verify/J1_press_settings_ball_x3.png`（长按）/ `J0_rest_settings_ball_x3.png`（静止）。
+纯白页面上"球里读出底座轮廓"依然很淡 —— 这是白底没有对比度的物理限制，不是算法。
+
+当前源码 = v3 + E5 + E6 + E8，候选备份 `output/golden/LotusBottomBar.CAND-E1E5E6E8-2026-10-16.kt`。
+
+## ★ 2026-10-17：底栏照 NASclaw 抄 + 记忆改成"合并"
+
+### 底栏（`ui/nav/LotusBottomBar.kt`，备份 `output/golden/LotusBottomBar.NASCLAW-2026-10-17.kt`）
+
+用户口径：「你可以在我机器里找一个叫 NASclaw 的底栏，那个底栏做的就非常完美 你直接抄外观，
+抄得一模一样就行」。源文件：`/Users/l/WorkBuddy/nasclaw/upstream/openclaw/apps/android/app/src/main/java/ai/openclaw/app/ui/NasBottomBar.kt`
+
+| 项 | NASclaw（已抄入） | 之前 Lotus |
+| --- | --- | --- |
+| 栏体模糊 | `blur(8dp)` | 2.56dp |
+| 栏体折射 | `lens(24dp, 24dp)` | 9.3 / 17.25dp |
+| 表面色 | 画布色 ×0.4 | 自造渐变霜面 |
+| 描边 | 无（它的注释：删掉全部手写黑纱/描边/rim） | 有 rim |
+| 泡折射 | `10dp·p / 14dp·p` | 4+10p / 6+14p |
+| 栏高/内层 | 64dp / 56dp | 60dp / 50dp |
+
+实拍：`output/verify/R1_settings_zoom.png`（静止）/ `R2_press_zoom.png`（长按，球里上下都读得出边 + 色散）。
+
+### 记忆写入（`data/Prompts.kt`，备份 `output/golden/Prompts.UPSERT-2026-10-17.kt`）
+
+用户口径：「不是靠追加，而是靠直接改里面的内容」「记忆的总是追加，没有整体感，后面会越堆越多」。
+
+- 新增 `upsertAiEntries()`：AI 区**固定**只有 `## 记忆 · 自动维护` 一段；条目格式 `- 主题：内容`；
+  同主题命中 → **整条替换**；新主题才追加。用户手写区（第一个 AI 标题之前）一个字节不动。
+- `applyWrites()` / `appendAutoMemory()` 都改走 upsert。
+- `normalizeEntries()`：把模型写字面的 `\n` 还原成真换行，按行拆成多条，去掉 `-`/`#` 前缀。
+- 提示词同步：`ToolIndex` / `AbilityLimits` / `MemoryProtocol` 都改成 `主题：内容` + "同主题自动替换"。

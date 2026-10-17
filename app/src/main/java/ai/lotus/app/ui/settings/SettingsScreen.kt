@@ -6,12 +6,19 @@ import android.content.Intent
 import android.net.Uri
 import ai.lotus.app.data.AppPrefs
 import ai.lotus.app.data.AvatarStore
+import ai.lotus.app.data.BackupManager
+import ai.lotus.app.data.BackupResult
 import ai.lotus.app.data.Capabilities
 import ai.lotus.app.data.CapabilityEndpoint
 import ai.lotus.app.data.CapabilityKind
+import ai.lotus.app.data.CapabilityStatus
 import ai.lotus.app.data.Conversation
 import ai.lotus.app.data.DefaultAssistantName
 import ai.lotus.app.data.LlmApi
+import ai.lotus.app.data.ModelCapabilityProfile
+import ai.lotus.app.data.ModelCapabilityStore
+import ai.lotus.app.data.ModelIdentityStatus
+import ai.lotus.app.data.probeModelCapabilities
 import ai.lotus.app.data.Prompts
 import ai.lotus.app.data.UpdateChecker
 import ai.lotus.app.data.Probe
@@ -21,6 +28,7 @@ import ai.lotus.app.ui.glass.glassPanel
 import ai.lotus.app.ui.glass.pressLiquid
 import ai.lotus.app.ui.icons.LotusGlyph
 import ai.lotus.app.ui.home.GlassConfirmDialog
+import ai.lotus.app.ui.home.GlassPromptDialog
 import ai.lotus.app.ui.icons.LotusIcon
 import ai.lotus.app.ui.model.thinkingFor
 import ai.lotus.app.ui.theme.LotusPalette
@@ -29,11 +37,14 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
@@ -117,7 +128,10 @@ private enum class SettingsPage(val title: String) {
   Changelog("版本日志"),
 }
 
-private const val AppVersion = "2026.10.11"
+// ⚠️ 别再写死：以前这里钉着 "2026.10.11"，版本号改了这里不跟着变，
+//    关于页会一直显示老版本（用户："你没有保存"那类"按了没用"的错觉，有一半是这种）。
+//    一律读 build.gradle.kts 里的 versionName，单一来源。
+private val AppVersion: String = ai.lotus.app.BuildConfig.VERSION_NAME
 
 @Composable
 fun SettingsScreen(
@@ -148,8 +162,6 @@ fun SettingsScreen(
   /** 记忆库里已落盘的 .md 个数。 */
   memoryFiles: Int = 0,
   /** 每次最多带最近几条消息（0 = 不限）。 */
-  contextTurns: Int = 0,
-  onContextTurns: (Int) -> Unit = {},
   /** 用户自己传的聊天头像文件路径（AvatarStore）。null = 没传。 */
   userAvatarPath: String? = null,
   /** 换过头像之后回调，让外面把聊天页重画一遍。 */
@@ -168,9 +180,24 @@ fun SettingsScreen(
    * 弹层，玻璃才是真的。
    */
   onCheckUpdate: () -> Unit = {},
+  /** 备份导入成功后，让 LotusApp 把内存里的模型 / 会话 / MD 状态全部重载。 */
+  onBackupImported: () -> Unit = {},
   bottomInset: Dp,
 ) {
   var page by remember { mutableStateOf(SettingsPage.Index) }
+  // ---- 「保存成功」这类一闪而过的确认 ----
+  //
+  // 用户口径：「应该在屏幕中上方或下方，加一个"保存成功"之类的提示」。
+  // 为什么必须有：保存是**静默**的 —— 点完没有任何反馈，人根本不知道存没存进去
+  // （"按了没反应"的无力感有一半来自这里）。所以每次真的落盘都给一句话。
+  // 位置放在**底部偏上**（底栏上面一点）：中上方会挡住立绘和标题，下方最不打扰。
+  var toast by remember { mutableStateOf<String?>(null) }
+  LaunchedEffect(toast) {
+    if (toast != null) {
+      delay(1600)
+      toast = null
+    }
+  }
   var editingId by remember { mutableStateOf<String?>(null) }
   // 换用户头像：选图 → 拷进私有目录 → 通知外面刷新。
   val avatarContext = LocalContext.current
@@ -195,6 +222,7 @@ fun SettingsScreen(
   // 用户原话：「我连续点了几个，最后发现它没有一镜到底，而是被挡住了，说明上面还有隐藏的顶栏」。
   // 硬切 + 每次重建滚动容器 = 看起来像"被上一个页面挡住"。改成同向滑动 + 交叉淡入：
   // 进子页从右滑入、返回从左滑入，视觉上是同一块玻璃在平移。
+  Box(modifier = Modifier.fillMaxSize()) {
   AnimatedContent(
     targetState = page,
     transitionSpec = {
@@ -214,7 +242,6 @@ fun SettingsScreen(
         selectedModelId = selectedModelId,
         thinkingIndex = thinkingIndex,
         assistantName = assistantName,
-        contextTurns = contextTurns,
         messageCount = messageCount,
         conversationCount = conversationCount,
         archivedConversations = archivedConversations,
@@ -249,6 +276,7 @@ fun SettingsScreen(
             else providers.map { if (it.id == updated.id) updated else it }
           onProvidersChange(next)
           editingId = updated.id
+          toast = "保存成功"
         },
         onSelectModel = onSelectModel,
         onDelete =
@@ -284,7 +312,10 @@ fun SettingsScreen(
         kind = kind,
         current = capabilities.get(kind),
         bottomInset = bottomInset,
-        onSave = { next -> onCapabilitiesChange(capabilities.set(kind, next)) },
+        onSave = { next ->
+          onCapabilitiesChange(capabilities.set(kind, next))
+          toast = "已保存"
+        },
         onBack = back,
       )
     }
@@ -295,8 +326,6 @@ fun SettingsScreen(
     SettingsPage.Conversation ->
       ConversationPane(
         bottomInset = bottomInset,
-        contextTurns = contextTurns,
-        onContextTurns = onContextTurns,
         userAvatarPath = userAvatarPath,
         onPickAvatar = {
           pickAvatar.launch(
@@ -315,6 +344,7 @@ fun SettingsScreen(
         conversationCount = conversationCount,
         providerCount = providers.size,
         memoryFiles = memoryFiles,
+        onBackupImported = onBackupImported,
         onBack = back,
       )
     SettingsPage.Archived ->
@@ -337,6 +367,35 @@ fun SettingsScreen(
     SettingsPage.Changelog -> ChangelogPane(bottomInset, back)
     }
   }
+
+  // 「保存成功」浮层。见上面 [toast] 的说明。
+  // ⚠️ 它是页面槽里的浮层，背后是纯白 —— 所以**必须自带体色**（veil 拉高），
+  //    否则在白底上就是一块看不见的白板。
+  AnimatedVisibility(
+    visible = toast != null,
+    enter = fadeIn(tween(140)) + scaleIn(tween(180), initialScale = 0.92f),
+    exit = fadeOut(tween(180)) + scaleOut(tween(180), targetScale = 0.96f),
+    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = bottomInset + 8.dp),
+  ) {
+    val shape = RoundedCornerShape(18.dp)
+    Row(
+      modifier =
+        Modifier.glassPanel(
+            shape = shape,
+            strength = 0.6f,
+            veil = 1.8f,
+            rimAlpha = 0.9f,
+            elevation = 10.dp,
+          )
+          .padding(horizontal = 16.dp, vertical = 9.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      LotusIcon(LotusGlyph.Sparkle, LotusPalette.Ink.copy(alpha = 0.8f), Modifier.size(14.dp))
+      Spacer(Modifier.width(7.dp))
+      Text(text = toast.orEmpty(), color = LotusPalette.Ink, fontSize = 13.sp)
+    }
+  }
+  }
 }
 
 // ---------------------------------------------------------------- 索引页
@@ -348,7 +407,6 @@ private fun SettingsIndex(
   selectedModelId: String,
   thinkingIndex: Int,
   assistantName: String,
-  contextTurns: Int,
   messageCount: Int,
   conversationCount: Int,
   archivedConversations: List<Conversation>,
@@ -448,8 +506,8 @@ private fun SettingsIndex(
       SettingsRow(
         "对话设置",
         // 这里以前显示「思考 · medium」。模型 / 思考档位已经收归「默认模型」页，
-        // 这一行只说它自己管的事：头像、显示项、上下文。
-        "头像 · 显示项 · " + (if (contextTurns == 0) "上下文不限" else "带 $contextTurns 条"),
+        // 这一行只说它自己管的事：头像、显示项。
+        "头像 · 显示项",
         icon = LotusGlyph.Tune,
         onClick = { onOpen(SettingsPage.Conversation) },
       )
@@ -594,7 +652,7 @@ private fun AddPillButton(text: String, modifier: Modifier = Modifier, onClick: 
   val pressed by interaction.collectIsPressedAsState()
   val scale by
     animateFloatAsState(
-      targetValue = if (pressed) 0.97f else 1f,
+      targetValue = if (pressed) 1.03f else 1f,
       animationSpec = spring(dampingRatio = 0.42f, stiffness = 900f),
       label = "pillScale",
     )
@@ -832,7 +890,7 @@ private fun ProviderEditPane(
 
     Spacer(Modifier.height(18.dp))
     SettingsGroup(enter = 1) {
-      SettingsRow("保存", null, chevron = false, onClick = { onSave(snapshot()) })
+      SettingsRow("保存", null, chevron = false, strong = true, onClick = { onSave(snapshot()) })
     }
 
     onDelete?.let {
@@ -931,6 +989,29 @@ private fun DefaultModelPane(
 ) {
   val tiers = thinkingFor(selectedModelId)
   val withModels = providers.filter { it.models.isNotEmpty() }
+  val context = LocalContext.current
+  val scope = rememberCoroutineScope()
+  val selectedProvider = providers.firstOrNull { it.id == selectedProviderId }
+  var modelCapabilities by remember(selectedProviderId, selectedModelId) {
+    mutableStateOf(ModelCapabilityStore.load(context, selectedProviderId.orEmpty(), selectedModelId))
+  }
+  var probingCapabilities by remember { mutableStateOf(false) }
+  var capabilityHint by remember { mutableStateOf("") }
+
+  fun detectCapabilities() {
+    val provider = selectedProvider ?: return
+    if (selectedModelId.isBlank() || probingCapabilities) return
+    probingCapabilities = true
+    capabilityHint = ""
+    scope.launch {
+      val result = probeModelCapabilities(provider, selectedModelId)
+      ModelCapabilityStore.save(context, provider.id, selectedModelId, result)
+      modelCapabilities = result
+      capabilityHint =
+        "视觉 ${result.vision.label} · 联网 ${result.nativeWebSearch.label}"
+      probingCapabilities = false
+    }
+  }
 
   SettingsScaffold(SettingsPage.DefaultModel.title, bottomInset, onBack) {
     if (withModels.isEmpty()) {
@@ -953,14 +1034,73 @@ private fun DefaultModelPane(
       Spacer(Modifier.height(6.dp))
     }
 
+    Spacer(Modifier.height(20.dp))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      Column(Modifier.weight(1f)) {
+        Text("当前模型能力", style = MaterialTheme.typography.titleMedium, color = LotusPalette.Ink)
+      }
+      MiniPill(
+        text = if (probingCapabilities) "检测中" else "检测能力",
+        enabled = selectedProvider != null && selectedModelId.isNotBlank() && !probingCapabilities,
+        onClick = { detectCapabilities() },
+      )
+    }
+    Spacer(Modifier.height(10.dp))
+    SettingsGroup {
+      SettingsRow(
+        title = "视觉输入",
+        value = (modelCapabilities?.vision ?: CapabilityStatus.Unknown).label,
+        selected = modelCapabilities?.vision == CapabilityStatus.Supported,
+        chevron = false,
+        onClick = { detectCapabilities() },
+      )
+      Hairline()
+      SettingsRow(
+        title = "原生联网",
+        value = (modelCapabilities?.nativeWebSearch ?: CapabilityStatus.Unknown).label,
+        selected = modelCapabilities?.nativeWebSearch == CapabilityStatus.Supported,
+        chevron = false,
+        onClick = { detectCapabilities() },
+      )
+      Hairline()
+      SettingsRow(
+        title = "模型一致性",
+        value = modelCapabilities?.let {
+          val state = it.identity.label
+          if (it.responseModel.isBlank()) state else "$state · ${it.responseModel}"
+        } ?: ModelIdentityStatus.Unknown.label,
+        selected = modelCapabilities?.identity == ModelIdentityStatus.Match,
+        chevron = false,
+        onClick = { detectCapabilities() },
+      )
+      Hairline()
+      SettingsRow(
+        title = "生图",
+        value = if (capabilities.ready(CapabilityKind.Image)) "已配置" else "未配置",
+        selected = capabilities.ready(CapabilityKind.Image),
+        chevron = false,
+        onClick = { onEditCapability(CapabilityKind.Image) },
+      )
+      Hairline()
+      SettingsRow(
+        title = "搜索备用源",
+        value = if (capabilities.ready(CapabilityKind.Search)) "已配置" else "未配置",
+        selected = capabilities.ready(CapabilityKind.Search),
+        chevron = false,
+        onClick = { onEditCapability(CapabilityKind.Search) },
+      )
+    }
+    if (capabilityHint.isNotBlank()) {
+      Text(
+        text = capabilityHint,
+        style = MaterialTheme.typography.bodySmall,
+        color = LotusPalette.InkMuted,
+        modifier = Modifier.padding(start = 6.dp, top = 6.dp),
+      )
+    }
+
     Spacer(Modifier.height(18.dp))
     Text("思考档位", style = MaterialTheme.typography.titleMedium, color = LotusPalette.Ink)
-    Text(
-      text = "跟着模型走：换模型会自动夹到它支持的档位",
-      style = MaterialTheme.typography.bodySmall,
-      color = LotusPalette.InkMuted,
-      modifier = Modifier.padding(top = 4.dp, start = 4.dp),
-    )
     Spacer(Modifier.height(10.dp))
     SettingsGroup {
       tiers.forEachIndexed { index, option ->
@@ -980,12 +1120,6 @@ private fun DefaultModelPane(
     // 「这些都可以放在一个叫默认模型里面」。
     Spacer(Modifier.height(22.dp))
     Text("外围能力", style = MaterialTheme.typography.titleMedium, color = LotusPalette.Ink)
-    Text(
-      text = "主模型自己不带的能力，在这里另配一个服务补上",
-      style = MaterialTheme.typography.bodySmall,
-      color = LotusPalette.InkMuted,
-      modifier = Modifier.padding(top = 4.dp, start = 4.dp),
-    )
     Spacer(Modifier.height(10.dp))
     SettingsGroup {
       CapabilityKind.entries.forEachIndexed { index, kind ->
@@ -1149,10 +1283,9 @@ private fun MemoryPane(bottomInset: Dp, onOpenMd: () -> Unit, onBack: () -> Unit
   val context = LocalContext.current
   var memoryEnabled by remember { mutableStateOf(AppPrefs.memoryEnabled(context)) }
   var autoMemory by remember { mutableStateOf(AppPrefs.autoMemoryEnabled(context)) }
-  var fullMemory by remember { mutableStateOf(AppPrefs.fullMemoryEnabled(context)) }
+  // ⚠️ 2026-10-16：记忆读取**恒定走全量**，不再有"全量 / 按需"两档（见 AppPrefs.fullMemoryEnabled）。
+  // 用户口径：「以后不要热插拔了，就走全量，给全部提示词。这样才能让他看到记忆。」
   val injected =
-    Prompts.promptCost(context, DefaultAssistantName, false, memoryEnabled, autoMemory, fullMemory)
-  val fullCost =
     Prompts.promptCost(context, DefaultAssistantName, false, memoryEnabled, autoMemory, true)
   val files = remember(memoryEnabled) { Prompts.allMarkdown(context).size }
 
@@ -1160,12 +1293,7 @@ private fun MemoryPane(bottomInset: Dp, onOpenMd: () -> Unit, onBack: () -> Unit
     SettingsGroup {
       GlassToggleRow(
         title = "注入记忆",
-        value =
-          when {
-            !memoryEnabled -> "关闭"
-            fullMemory -> "每轮 $injected 字（全量）"
-            else -> "每轮 $injected 字（热指针）"
-          },
+        value = if (memoryEnabled) "每轮 $injected 字（全量）" else "关闭",
         checked = memoryEnabled,
         onToggle = {
           memoryEnabled = it
@@ -1185,17 +1313,9 @@ private fun MemoryPane(bottomInset: Dp, onOpenMd: () -> Unit, onBack: () -> Unit
         },
       )
       Hairline()
-      // 分层读取：默认只带「热指针」，其余靠 AI 自己点名去取（见 Prompts.RecallProtocol）。
-      // 这个开关是给"我就不想让它去取、全部直接怼进去"的人留的 —— 代价写在副标题上，不藏着。
-      GlassToggleRow(
-        title = "全量记忆",
-        value = if (fullMemory) "每轮 $fullCost 字" else "按需读取（省 token）",
-        checked = fullMemory,
-        onToggle = {
-          fullMemory = it
-          AppPrefs.setFullMemoryEnabled(context, it)
-        },
-      )
+      // 不再是开关：读取恒定全量（IDENTITY / SOUL / AGENTS / USER / MEMORY 全文每轮都带）。
+      // 一行说明摆在这儿，让人知道钱花在哪、为什么 —— 但改不了，因为这是定下来的产品决策。
+      SettingsRow("读取方式", "全量 · 每轮都带", icon = LotusGlyph.Folder, onClick = onOpenMd)
       Hairline()
       SettingsRow("记忆文件", "$files 个 .md", icon = LotusGlyph.Folder, onClick = onOpenMd)
     }
@@ -1205,8 +1325,6 @@ private fun MemoryPane(bottomInset: Dp, onOpenMd: () -> Unit, onBack: () -> Unit
 @Composable
 private fun ConversationPane(
   bottomInset: Dp,
-  contextTurns: Int,
-  onContextTurns: (Int) -> Unit,
   userAvatarPath: String?,
   onPickAvatar: () -> Unit,
   onClearAvatar: () -> Unit,
@@ -1294,21 +1412,17 @@ private fun ConversationPane(
         },
       )
     }
-    Spacer(Modifier.height(12.dp))
-
-    Caption("上下文")
-    GlassField(
-      label = "每次最多带最近几条消息（0 = 不限）",
-      value = if (contextTurns == 0) "" else contextTurns.toString(),
-      placeholder = "不限",
-      digitOnly = true,
-      onChange = { onContextTurns(it.toIntOrNull() ?: 0) },
-    )
+    // ⚠️ 这里原来还有「每次最多带最近几条消息（0 = 不限）」一行 —— 那就是"裁剪上下文"。
+    //    用户口径：「裁剪那个功能没用…把那裁剪给删除吧」。这条旋钮连同聊天页 ⋯ 里的「裁剪」一起删了，
+    //    不留一个按不动 / 改了也看不出来的死开关。
+    //
     // ⚠️ 这里原来还有「流式输出 / 一次提问 / 自动压缩」三行 —— 它们长得像按键却没有 onClick，
     //    按下去什么都不发生。用户口径：「有些按键根本按不动，你还要硬给它加上去…你可以把它删掉呀」。
     //    这三条是实现事实（不是设置项），已经写在 CAPABILITIES.md 里给人看，不摆在这里装开关。
   }
 }
+
+private enum class BackupAction { Export, Import }
 
 @Composable
 private fun DataPane(
@@ -1316,8 +1430,55 @@ private fun DataPane(
   conversationCount: Int,
   providerCount: Int,
   memoryFiles: Int,
+  onBackupImported: () -> Unit,
   onBack: () -> Unit,
 ) {
+  val context = LocalContext.current
+  val scope = rememberCoroutineScope()
+  var promptAction by remember { mutableStateOf<BackupAction?>(null) }
+  var pendingPassword by remember { mutableStateOf("") }
+  var busy by remember { mutableStateOf(false) }
+  var hint by remember { mutableStateOf("") }
+
+  val exportLauncher =
+    rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) {
+      uri ->
+      val password = pendingPassword
+      pendingPassword = ""
+      if (uri == null) return@rememberLauncherForActivityResult
+      scope.launch {
+        busy = true
+        hint = ""
+        val result = BackupManager.export(context, uri, password)
+        busy = false
+        hint =
+          when (result) {
+            is BackupResult.Ok -> "已导出 ${result.files} 个文件"
+            is BackupResult.Err -> result.message
+          }
+      }
+    }
+
+  val importLauncher =
+    rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+      val password = pendingPassword
+      pendingPassword = ""
+      if (uri == null) return@rememberLauncherForActivityResult
+      scope.launch {
+        busy = true
+        hint = ""
+        val result = BackupManager.import(context, uri, password)
+        busy = false
+        when (result) {
+          is BackupResult.Ok -> {
+            hint = "已导入 ${result.files} 个文件"
+            onBackupImported()
+          }
+          is BackupResult.Err -> hint = result.message
+        }
+      }
+    }
+
   // ⚠️ 这里原来有一个「清空所有会话」按钮（点两次真的清空）。
   //    2026-10-11 删掉：它不在用户的需求里，是我自作主张加的，而且**已经造成过一次真实的数据丢失**——
   //    设置页长按会被 Compose 的 clickable 当成点击、自己跳进这一页，手指再动一下就落到"清空"上。
@@ -1330,6 +1491,52 @@ private fun DataPane(
       Hairline()
       SettingsRow("记忆文件", "$memoryFiles 个 .md", chevron = false, onClick = {})
     }
+    Spacer(Modifier.height(12.dp))
+    SettingsGroup {
+      SettingsRow(
+        title = "导出加密备份",
+        value = if (busy) "处理中…" else "密码保护",
+        onClick = { if (!busy) promptAction = BackupAction.Export },
+      )
+      Hairline()
+      SettingsRow(
+        title = "导入加密备份",
+        value = if (busy) "处理中…" else "选择文件",
+        onClick = { if (!busy) promptAction = BackupAction.Import },
+      )
+    }
+    if (hint.isNotBlank()) {
+      Text(
+        text = hint,
+        style = MaterialTheme.typography.bodySmall,
+        color = if (hint.startsWith("已")) LotusPalette.Ink else Color(0xFFB14444),
+        modifier = Modifier.padding(start = 8.dp, top = 8.dp),
+      )
+    }
+  }
+
+  promptAction?.let { action ->
+    GlassPromptDialog(
+      title = if (action == BackupAction.Export) "设置备份密码" else "输入备份密码",
+      initial = "",
+      confirmLabel = "继续",
+      hint = "至少 8 位；忘记密码无法恢复。",
+      maskInput = true,
+      onConfirm = { password ->
+        if (password.length < 8) {
+          hint = "密码至少 8 位"
+        } else {
+          pendingPassword = password
+          promptAction = null
+          if (action == BackupAction.Export) {
+            exportLauncher.launch("LotusAI-backup.lotusbackup")
+          } else {
+            importLauncher.launch(arrayOf("application/octet-stream", "application/zip", "*/*"))
+          }
+        }
+      },
+      onDismiss = { promptAction = null },
+    )
   }
 }
 
@@ -1557,12 +1764,6 @@ private fun AboutPane(
       horizontalAlignment = Alignment.CenterHorizontally,
     ) {
       Text(
-        "此为快速测试版 · 周更",
-        style = MaterialTheme.typography.labelSmall,
-        color = LotusPalette.InkMuted,
-      )
-      Spacer(Modifier.height(10.dp))
-      Text(
         "开源依赖",
         style = MaterialTheme.typography.labelSmall,
         color = LotusPalette.InkFaint,
@@ -1604,7 +1805,7 @@ internal fun SettingsScaffold(
       val backPressed by backInteraction.collectIsPressedAsState()
       val backScale by
         animateFloatAsState(
-          targetValue = if (backPressed) 0.90f else 1f,
+          targetValue = if (backPressed) 1.10f else 1f,
           animationSpec = spring(dampingRatio = 0.40f, stiffness = 1100f),
           label = "backScale",
         )
@@ -1709,6 +1910,13 @@ internal fun SettingsRow(
   selected: Boolean = false,
   /** 左侧那枚玻璃圆片里的图标。null = 这一行不要图标（值行、说明行）。 */
   icon: LotusGlyph? = null,
+  /**
+   * 主操作行（比如"保存"）—— 按压缩放更大、玻璃更实。
+   *
+   * 用户口径：「点保存键的反馈感还是太弱」。普通行是"列表里的一行"，
+   * 反馈必须克制；保存是**这一页唯一的动作**，反馈可以而且应该更明显。
+   */
+  strong: Boolean = false,
   onClick: () -> Unit,
 ) {
   // 按压弹动：按下整行轻微收 + 一点墨色，抬手回弹（spring 欠阻尼，带一点点余震）。
@@ -1724,9 +1932,15 @@ internal fun SettingsRow(
   Row(
     modifier =
       Modifier.fillMaxWidth()
-        .pressLiquid(active = press, shape = RoundedCornerShape(16.dp))
+        // ⚠️ 按下是**放大**，不是缩小（用户口径：「往内缩不好看」）。
+        .pressLiquid(
+          active = press,
+          shape = RoundedCornerShape(16.dp),
+          scale = if (strong) 1.055f else 1.03f,
+          strength = if (strong) 0.95f else 0.62f,
+        )
         .clickable(interactionSource = interaction, indication = null, onClick = onClick)
-        .padding(horizontal = 18.dp, vertical = 14.dp),
+        .padding(horizontal = 18.dp, vertical = 12.dp),
     verticalAlignment = Alignment.CenterVertically,
   ) {
     if (icon != null) {

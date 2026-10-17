@@ -1,7 +1,7 @@
 # Lotus AI —— 界面规格（已定稿）
 
-定稿图：`output/imagegen/ui-glass-12-home-final.png`（首页）
-对话状态：`output/imagegen/ui-glass-11-chat.png`
+定稿图：`~/.Trash/lotus-ai-output-2026-10-16/imagegen/ui-glass-12-home-final.png`（首页；原 `output/imagegen/` 2026-10-16 整体移入废纸篓）
+对话状态：`~/.Trash/lotus-ai-output-2026-10-16/imagegen/ui-glass-11-chat.png`（同上）
 
 ---
 

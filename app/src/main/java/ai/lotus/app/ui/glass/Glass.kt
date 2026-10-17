@@ -488,6 +488,7 @@ fun Modifier.floatGlass(
   elevation: Dp = 16.dp,
   veil: Float = 1f,
   dim: Float = 0f,
+  blurScale: Float = LiquidBlurScale,
 ): Modifier =
   glassPanel(
     shape = shape,
@@ -497,6 +498,7 @@ fun Modifier.floatGlass(
     elevation = elevation,
     rimAlpha = FloatingGlassRimAlpha,
     veil = veil,
+    blurScale = blurScale,
   )
 
 /**
@@ -527,19 +529,45 @@ fun Modifier.glassInline(
   val density = LocalDensity.current
   val blurPx = with(density) { (16f * strength * LiquidBlurScale).dp.toPx() * a }
   val lensPx = with(density) { (20f * strength * lensScale).dp.toPx() * a }
-  return this.drawBackdrop(
-    backdrop = backdrop,
-    shape = { shape },
-    effects = {
-      vibrancy()
-      if (blurPx > 0f) blur(blurPx)
-      if (lensPx > 0f) lens(lensPx * 0.78f, lensPx * 1.5f, chromaticAberration = true)
-    },
-    highlight = { Highlight.Default.copy(width = 1.dp, alpha = 0.55f * a) },
-    shadow = { Shadow(alpha = 0f) },
-    innerShadow = { InnerShadow(radius = 0f.dp, alpha = 0f) },
-  )
+  return this
+    // ---- ⚠️ 2026-10-16：按下必须**看得见**，不能只靠折射 ----
+    //
+    // 用户口径：「设置的时候这些按键……按了之后没任何反应，这就很无力」「反馈感的话，
+    // 就像玻璃拉伸那种」。实测确认：这一版以前按下只做「折射背景 + 一圈白描边」，
+    // 而设置页 / MD 页拿到的 backdrop 是**纯白底色** —— 没东西可折射，白边压在白底上
+    // 也看不见，最后只剩 2% 缩放，肉眼就是"按了没反应"。
+    //
+    // 所以按下时让这块玻璃**真的离开纸面一点点**，三样都跟按压强度 a 走：
+    //   ① 投影（Modifier.shadow）：抬起来才有影子，白底上最读得出来；
+    //   ② 玻璃体（glassVeilBrush）：见它头部那段 —— 纯白底上白高光不可能更亮，
+    //      只有把体色压暗几个百分点，边上那圈镜面高光才成立；
+    //   ③ 镜面描边（glassRim）：苹果那圈 specular。
+    // ⛔ 依然不许用"整块变灰"当反馈（那是用户否掉的传统 ripple）。
+    .shadow(
+      elevation = PressLift * a,
+      shape = shape,
+      clip = false,
+      ambientColor = Color(0x14000000),
+      spotColor = Color(0x1F000000),
+    )
+    .drawBackdrop(
+      backdrop = backdrop,
+      shape = { shape },
+      effects = {
+        vibrancy()
+        if (blurPx > 0f) blur(blurPx)
+        if (lensPx > 0f) lens(lensPx * 0.78f, lensPx * 1.5f, chromaticAberration = true)
+      },
+      highlight = { Highlight.Default.copy(width = 1.dp, alpha = 0.90f * a) },
+      shadow = { Shadow(alpha = 0f) },
+      innerShadow = { InnerShadow(radius = 0f.dp, alpha = 0f) },
+      onDrawSurface = { drawRect(brush = glassVeilBrush(scale = a)) },
+    )
+    .glassRim(shape = shape, alpha = 0.9f * a)
 }
+
+/** 按下时玻璃"抬起"多少。见 [glassInline] 里那段说明：白底上没投影就等于没反馈。 */
+private val PressLift = 7.dp
 
 /**
  * **行级按压反馈** —— 列表里那种"整行都是按键"的地方用它。
@@ -606,7 +634,7 @@ class RowPress internal constructor(
 )
 
 @Composable
-fun rowPress(shape: Shape, scale: Float = 1.02f, strength: Float = 0.34f): RowPress {
+fun rowPress(shape: Shape, scale: Float = 1.03f, strength: Float = 0.34f): RowPress {
   val interaction = remember { MutableInteractionSource() }
   val pressed by interaction.collectIsPressedAsState()
   val press by

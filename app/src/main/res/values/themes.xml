@@ -1,19 +1,9 @@
 <resources>
-  <style name="Theme.LotusAI" parent="@android:style/Theme.Material.Light.NoActionBar">
+  <style name="Theme.LotusAI" parent="Theme.LotusAI.Base" />
+
+  <style name="Theme.LotusAI.Base" parent="@android:style/Theme.Material.Light.NoActionBar">
     <!-- 冷启动窗口背景（API < 31 直接铺这一层）。 -->
     <item name="android:windowBackground">@drawable/splash_background</item>
-
-    <!-- Android 12+ 的系统启动页。
-         ⚠️ 平台只认这两样：一个**纯色**背景 + 一枚被裁成 192dp 圆形的图标。
-         - 把 drawable 塞进 windowSplashScreenBackground 是**不生效**的（真机实测：那几百毫秒
-           就是一片白，用户看到的就是"先白一下再冒出来"）；
-         - 所以「立绘 + 应用名」必须烘进一张 **圆内安全** 的图，当图标交给系统
-           （drawable-nodpi/lotus_splash_icon.png，576px = 192dp）。
-         图标被裁的圆正好是 192dp、圆心在屏幕中心，Compose 那层照着同一个尺寸画
-           （见 ui/SplashScreen.kt）⇒ 系统层和 App 层是同一张画，切过去看不见接缝。 -->
-    <item name="android:windowSplashScreenBackground">@color/lotus_canvas</item>
-    <item name="android:windowSplashScreenAnimatedIcon">@drawable/lotus_splash_icon</item>
-    <item name="android:windowSplashScreenAnimationDuration">0</item>
 
     <item name="android:statusBarColor">@android:color/transparent</item>
     <item name="android:navigationBarColor">@android:color/transparent</item>

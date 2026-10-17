@@ -34,6 +34,35 @@ data class StoredMessage(
    *    也不用 content:// （相册给的一次性授权重启就失效）。
    */
   val imagePath: String = "",
+  /**
+   * 这条回答**上游给的推理过程**（`reasoning_content`）。
+   *
+   * 只存真的收到过的那部分；上游不吐就是空串 —— 界面上不显示"思考过程"这一块，
+   * 而不是拿正文冒充思考。界面上默认收起，点一下才展开。
+   */
+  val reasoning: String = "",
+  /**
+   * 这一轮 AI **真的用到的能力**（客户端自己记的，不是模型自称的）。
+   *
+   * 值是这个集合的子集：`记忆`（读了记忆）· `记住`（写了记忆）· `提示词`（改了人设/规则）·
+   * `整理`（重写了记忆段）· `联网`（这次开了联网搜索）· `生图`（这次出图了）。
+   */
+  val tools: List<String> = emptyList(),
+  /**
+   * 上面那些动作的**明细**，每条 `标签｜详情`（例：`记住｜MEMORY.md · 称呼：用户叫戏山`）。
+   *
+   * 用户口径：「那些调用工具我也不能看详细内容」—— 光有一个"记住"的标签看不出到底写了什么，
+   * 所以明细也一起存下来，聊天页那张过程卡片直接展示。
+   */
+  val toolLog: List<String> = emptyList(),
+  /**
+   * **它真的读过哪些网页** —— 上游在这条回答里回的 URL 引用（`annotations`）。
+   *
+   * 跟 [toolLog] 里的"联网"标签不是一回事：标签只说明"这次开了联网"，不一定真检索了；
+   * 这里存的是上游报回来的页面。上游不报就是空 —— 聊天页那行"访问记录"整行不出现，
+   * **不许**拿正文里模型自己写的链接顶上（那是"说得像真的"）。
+   */
+  val sources: List<String> = emptyList(),
 )
 
 /**
@@ -51,13 +80,21 @@ data class Conversation(
   val updatedAt: Long = 0L,
   val messages: List<StoredMessage> = emptyList(),
   /**
-   * **压缩后的历史摘要**。非空时，发请求只带"摘要 + 最近 [keepRecent] 条"，
-   * 比它更早的原文不进请求（但**界面里一直都在**，只是不再花钱）。
+   * **压缩后的历史摘要**。非空时，请求里只带摘要和 [summaryUpTo] 之后的新消息；
+   * 原文一直留在 [messages] 里供界面查看，只是不再重复消耗 token。
    */
   val summary: String = "",
   /**
-   * 裁剪：一次请求最多带最近几条消息。0 = 不裁（全带）。
-   * 跟 [summary] 配合：摘要管"记得住"，裁剪管"发得少"。
+   * 已经被 [summary] 覆盖到的最后一条消息 id。
+   *
+   * 0 = 还没压缩；或旧版摘要没有记录边界（加载时会迁移成当时最后一条消息的 id）。
+   * 这里只影响**请求上下文**，从不删除界面里的原文。
+   */
+  val summaryUpTo: Long = 0L,
+  /**
+   * ⚠️ 2026-10-16 起**废弃不用**：裁剪功能已被用户要求整条删除（"裁剪那个功能没用"），
+   *    请求里永远是全部消息。字段留着只为兼容老 `conversations.json`（序列化器不认识未知 key 会炸），
+   *    新代码不许再读它。
    */
   val keepRecent: Int = 0,
   /**
@@ -115,7 +152,18 @@ object ConversationStore {
     runCatching {
         val file = File(context.filesDir, FileName)
         if (!file.exists()) emptyList()
-        else json.decodeFromString<List<Conversation>>(file.readText())
+        else
+          json
+            .decodeFromString<List<Conversation>>(file.readText())
+            // 旧版压缩只存了摘要、没存边界；旧逻辑的摘要是对当时全部消息生成的，
+            // 所以迁移到“最后一条消息”就是正确边界，不必让用户再压一遍。
+            .map { c ->
+              when {
+                c.summary.isBlank() -> c.copy(summaryUpTo = 0L)
+                c.summaryUpTo <= 0L -> c.copy(summaryUpTo = c.messages.maxOfOrNull { it.id } ?: 0L)
+                else -> c
+              }
+            }
       }
       .getOrElse { emptyList() }
 

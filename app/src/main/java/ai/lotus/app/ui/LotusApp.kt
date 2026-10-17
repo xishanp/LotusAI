@@ -37,6 +37,9 @@ import ai.lotus.app.ui.home.GlassConfirmDialog
 import ai.lotus.app.ui.home.GlassComposerPanel
 import ai.lotus.app.ui.home.ModelGroup
 import ai.lotus.app.ui.home.GlassPromptDialog
+import ai.lotus.app.ui.home.GlassSourcesSheet
+import ai.lotus.app.ui.home.GlassToast
+import ai.lotus.app.ui.home.GlassToolsPanel
 import ai.lotus.app.ui.model.thinkingFor
 import ai.lotus.app.ui.model.thinkingHint
 import ai.lotus.app.ui.glass.floatGlass
@@ -206,16 +209,23 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
   var chatPanelOpen by remember { mutableStateOf(false) }
   var renaming by remember { mutableStateOf(false) }
   var deleting by remember { mutableStateOf(false) }
+  // 改名 / 归档这类静默操作也要给用户一个看得见的结果。
+  var transientToast by remember { mutableStateOf<String?>(null) }
+  LaunchedEffect(transientToast) {
+    if (transientToast != null) {
+      delay(1600)
+      transientToast = null
+    }
+  }
 
   var providers by remember { mutableStateOf(ProviderStore.load(context)) }
   var capabilities by remember { mutableStateOf(CapabilityStore.load(context)) }
   // 用户自己传的聊天头像（见 AvatarStore）。改了要立刻重画聊天页。
   var userAvatarPath by remember { mutableStateOf(AvatarStore.path(context)) }
 
-  // ---- 提示词 / 记忆 / 上下文裁剪（对话设置里那几个真旋钮）----
+  // ---- 提示词 / 记忆（对话设置里那几个真旋钮）----
   var promptEnabled by remember { mutableStateOf(AppPrefs.promptEnabled(context)) }
   var memoryEnabled by remember { mutableStateOf(AppPrefs.memoryEnabled(context)) }
-  var contextTurns by remember { mutableStateOf(AppPrefs.contextTurns(context)) }
 
   // 助手名字**必须落盘**。用户口径：「我尝试给 AI 换名字，换了之后它每次介绍还是原来的那个，
   // 换了名字再重启后也就没了」—— 两个都修：名字落盘 + 开场白跟着改名同步（见 renameAssistant）。
@@ -312,6 +322,12 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
   var composerHeight by remember { mutableStateOf(LotusComposerHeight) }
   var writeHint by remember { mutableStateOf("") }
   var changelogOpen by remember { mutableStateOf(false) }
+  // 「工具」那一页（它都有哪些工具）。入口在聊天页右上角那块面板里。
+  var toolsOpen by remember { mutableStateOf(false) }
+  // 应用内阅读器打开的是哪个页面（null = 关着）。
+  var readerUrl by remember { mutableStateOf<String?>(null) }
+  // 「来源」半屏列表：点消息底部的站点图标先开这个，再点具体一条才进阅读器。
+  var sourcesSheet by remember { mutableStateOf<List<String>?>(null) }
   var updateChecking by remember { mutableStateOf(false) }
   var updateResult by remember { mutableStateOf<UpdateChecker.Result?>(null) }
   var updateJob by remember { mutableStateOf<Job?>(null) }
@@ -342,7 +358,7 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
     ConversationStore.save(context, conversations)
   }
 
-  /** 改当前会话的某一个字段（摘要 / 裁剪 / 真实用量），并立刻落盘。 */
+  /** 改当前会话的某一个字段（摘要 / 真实用量），并立刻落盘。 */
   fun updateCurrent(block: (Conversation) -> Conversation) {
     val id = currentId ?: return
     updateConversation(id, block)
@@ -350,17 +366,41 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
 
   fun stored(): List<StoredMessage> =
     messages.map {
-      StoredMessage(it.id, it.fromUser, it.text, it.at, it.model, it.tokens, it.imagePath)
+      StoredMessage(
+        it.id,
+        it.fromUser,
+        it.text,
+        it.at,
+        it.model,
+        it.tokens,
+        it.imagePath,
+        it.reasoning,
+        it.tools,
+        it.toolLog,
+        it.sources,
+      )
     }
 
   /** 把当前会话写回列表并落盘。没消息的会话不落盘 —— 历史里不留空壳。 */
   fun saveCurrent() {
     val id = currentId ?: return
     val snapshot = stored()
-    if (snapshot.isEmpty()) return
-    val now = System.currentTimeMillis()
+    if (snapshot.isEmpty()) {
+      // 删空 / 编辑掉最后一条后不能把旧消息继续留在 conversations.json 里；
+      // 否则界面已经空了，退出再进却又“复活”。这个会话本身也一并移除。
+      conversations = conversations.filterNot { it.id == id }
+      ConversationStore.save(context, conversations)
+      currentId = null
+      return
+    }
+    // 关键：保存 ≠ 活跃。只在**真的产生了更晚的消息**时更新历史排序；
+    // 单纯点开一个旧会话、退出、改名、记 token，都不能把它顶到最前面。
+    val newestAt = snapshot.maxOfOrNull { it.at } ?: 0L
     conversations =
-      conversations.map { c -> if (c.id != id) c else c.copy(messages = snapshot, updatedAt = now) }
+      conversations.map { c ->
+        if (c.id != id) c
+        else c.copy(messages = snapshot, updatedAt = maxOf(c.updatedAt, newestAt))
+      }
     ConversationStore.save(context, conversations)
   }
 
@@ -384,6 +424,29 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
     attachMenu = false
   }
 
+  /** 导入加密备份后，把磁盘上的整套状态重新装回内存。 */
+  fun reloadImportedData() {
+    conversations = ConversationStore.load(context)
+    providers = ProviderStore.load(context)
+    capabilities = CapabilityStore.load(context)
+    userAvatarPath = AvatarStore.path(context)
+    promptEnabled = AppPrefs.promptEnabled(context)
+    memoryEnabled = AppPrefs.memoryEnabled(context)
+    assistantName = AppPrefs.assistantName(context)
+    val selection = SelectionStore.load(context)
+    selectedProviderId = selection.first
+    selectedModelId = selection.second
+    thinkingIndex = thinkingIndex.coerceIn(0, thinkingFor(selectedModelId).lastIndex)
+    messages.clear()
+    currentId = null
+    inChat = false
+    draft = ""
+    attachmentPath = null
+    attachDoc = null
+    closeOverlays()
+    focus.clearFocus()
+  }
+
   fun newChat() {
     saveCurrent()
     messages.clear()
@@ -402,7 +465,19 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
       messages.clear()
       messages.addAll(
         target.messages.map {
-          ChatMessage(it.id, it.fromUser, it.text, it.at, it.model, it.tokens, it.imagePath)
+          ChatMessage(
+            it.id,
+            it.fromUser,
+            it.text,
+            it.at,
+            it.model,
+            it.tokens,
+            it.imagePath,
+            it.reasoning,
+            it.tools,
+            it.toolLog,
+            it.sources,
+          )
         }
       )
       currentId = id
@@ -423,6 +498,7 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
       conversations.map { c -> if (c.id != id) c else c.copy(title = title.trim()) }
     ConversationStore.save(context, conversations)
     renaming = false
+    transientToast = "对话名称已保存"
   }
 
   /**
@@ -440,6 +516,7 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
     currentId = null
     inChat = false
     deleting = false
+    transientToast = "会话已移到已归档"
   }
 
   /** 从归档里恢复一个会话。 */
@@ -510,7 +587,16 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
   val selectedProviderConfig = providers.firstOrNull { it.id == selectedProviderId }
   val contextWindow = selectedProviderConfig?.contextWindow ?: DefaultContextWindow
   val currentConversation = conversations.firstOrNull { it.id == currentId }
-  val estimatedTokens = Tokens.estimate(stored())
+  val summaryCutoff = currentConversation?.summaryUpTo ?: 0L
+  val estimatedRequestMessages =
+    if (currentConversation?.summary?.isNotBlank() == true && summaryCutoff > 0L) {
+      stored().filter { it.id > summaryCutoff }
+    } else {
+      stored()
+    }
+  val estimatedTokens =
+    Tokens.estimate(estimatedRequestMessages) +
+      Tokens.estimate(currentConversation?.summary.orEmpty())
   val realTokens = currentConversation?.promptTokens ?: 0
   val usedTokens = if (realTokens > 0) realTokens else estimatedTokens
   val usageIsReal = realTokens > 0
@@ -518,6 +604,8 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
 
   /** 正在生图的那条回复 id。聊天页据此在气泡里显示"正在画图…"。 */
   var paintingId by remember { mutableStateOf<Long?>(null) }
+  /** 正在流式回答的那条消息 id。用来控制思考玻璃自动出现 / 收起。 */
+  var replyingId by remember { mutableStateOf<Long?>(null) }
 
   // 「记住这段」——手动触发的记忆落盘（见 rememberConversation）。
   var rememberBusy by remember { mutableStateOf(false) }
@@ -550,16 +638,16 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
   }
 
   /**
-   * 真正发出去的那串上下文 = **摘要（有的话）+ 最近 keepRecent 条**。
+   * 真正发出去的那串上下文 = **摘要（有的话）+ 尚未被摘要覆盖的新消息**。
    *
-   * 这是"省 token"那一刀落地的唯一位置：界面里永远是全量消息，进请求的只有这么多。
+   * 原文从不从界面删除；压缩只改变请求边界。这样既保留完整聊天记录，又真的省 token。
    */
   fun requestTurns(excludeId: Long? = null): List<ChatTurn> {
     val all = messages.filter { it.id != excludeId }.filter { it.text.isNotBlank() }
     val conv = conversations.firstOrNull { it.id == currentId }
-    // 优先级：会话自己设的裁剪 > 全局默认（对话设置里那个"每次最多带最近 N 条"）> 不限。
-    val keep = conv?.keepRecent?.takeIf { it > 0 } ?: contextTurns
-    val recent = if (keep > 0) all.takeLast(keep) else all
+    val summary = conv?.summary.orEmpty().trim()
+    val cutoff = if (summary.isNotBlank()) conv?.summaryUpTo ?: 0L else 0L
+    val recent = if (cutoff > 0L) all.filter { it.id > cutoff } else all
     val turns = mutableListOf<ChatTurn>()
     // 提示词 + 记忆拼在**最前面**（见 data/Prompts.kt）。没写内容时这里是空的。
     Prompts
@@ -581,7 +669,7 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
         recallProbe = recent.lastOrNull { it.fromUser }?.text.orEmpty(),
       )
       .forEach { turns += ChatTurn("system", it) }
-    conv?.summary?.takeIf { it.isNotBlank() }?.let {
+    summary.takeIf { it.isNotBlank() }?.let {
       turns += ChatTurn("system", "以下是更早的对话摘要，当作已经聊过的背景：\n$it")
     }
     // 图只挂**最近一条用户消息**上：历史里的图再发一次纯属烧 token（用户最在意这个），
@@ -596,13 +684,8 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
     return turns
   }
 
-  /** 裁剪：一次请求只带最近 [keep] 条（0 = 取消）。 */
-  fun trimContext(keep: Int) {
-    updateCurrent { it.copy(keepRecent = keep.coerceAtLeast(0)) }
-  }
-
   /**
-   * 压缩：把**当前全部消息**交给模型压成一段摘要，之后只发"摘要 + 最近几条"。
+   * 压缩：把**尚未被摘要覆盖的消息**继续并入摘要，之后请求只发“摘要 + 新消息”。
    *
    * 原文一条都不删 —— 界面里照样能往上翻。压缩只是让它不再进请求。
    */
@@ -610,46 +693,65 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
     if (compressing) return
     val provider = providers.firstOrNull { it.id == selectedProviderId }
     if (provider == null || !provider.isComplete || selectedModelId.isBlank()) return
+    val conv = conversations.firstOrNull { it.id == currentId } ?: return
+    val cutoff = if (conv.summary.isNotBlank()) conv.summaryUpTo else 0L
+    val pending = messages.filter { it.text.isNotBlank() && (cutoff <= 0L || it.id > cutoff) }
+    if (pending.isEmpty()) return
     val transcript =
-      messages
-        .filter { it.text.isNotBlank() }
+      pending
         .joinToString("\n") { (if (it.fromUser) "用户" else "助手") + "：" + it.text }
-    if (transcript.isBlank()) return
+    val previousSummary = conv.summary.trim()
+    val input =
+      buildString {
+        if (previousSummary.isNotEmpty()) {
+          append("已有摘要：\n").append(previousSummary).append("\n\n新增对话：\n")
+        }
+        append(transcript)
+      }
+    val newCutoff = pending.maxOf { it.id }
     compressing = true
     scope.launch {
       var acc = ""
-      LlmApi.chatStream(
-          baseUrl = provider.baseUrl,
-          apiKey = provider.apiKey,
-          model = selectedModelId,
-          turns =
-            listOf(
-              ChatTurn("system", ContextSummaryPrompt),
-              ChatTurn("user", transcript),
-            ),
-          reasoningEffort = null,
-        )
-        .collect { event ->
-          when (event) {
-            is ChatEvent.Delta -> acc += event.text
-            is ChatEvent.Failed -> acc = ""
-            else -> Unit
+      try {
+        LlmApi.chatStream(
+            baseUrl = provider.baseUrl,
+            apiKey = provider.apiKey,
+            model = selectedModelId,
+            turns =
+              listOf(
+                ChatTurn("system", ContextSummaryPrompt),
+                ChatTurn("user", input),
+              ),
+            reasoningEffort = null,
+            maxTokens = 800,
+          )
+          .collect { event ->
+            when (event) {
+              is ChatEvent.Delta -> acc += event.text
+              is ChatEvent.Failed -> acc = ""
+              else -> Unit
+            }
+          }
+        val text = acc.trim()
+        if (text.isNotEmpty()) {
+          updateConversation(conv.id) {
+            it.copy(summary = text, summaryUpTo = newCutoff, promptTokens = 0)
           }
         }
-      val text = acc.trim()
-      if (text.isNotEmpty()) updateCurrent { it.copy(summary = text) }
-      compressing = false
+      } finally {
+        compressing = false
+      }
     }
   }
 
   /**
-   * 「记住这段」：把**当前这段对话**交给模型压成几条长期记忆，**追加**写进 `md/MEMORY.md`。
+   * 「记住这段」：把**当前这段对话**交给模型压成几条长期记忆，按主题合并进 USER / MEMORY。
    *
    * 为什么要有手动这一下：压缩只在超过阈值时才发生，没压到的对话就永远留不下东西。
    * 用户口径：「有些人如果没到压缩点的话，就永远不会有这段记忆，也就是说他得手动点」。
    *
    * 这一下**只在用户点的时候跑一次模型**，不是每轮都跑 —— 不会变成 Codex 那种额外开销。
-   * 写入用**追加**，用户自己在 MEMORY.md 里写的内容一个字节都不覆盖。
+   * 写入使用与自动记忆相同的按主题 upsert；用户手写区不动，也不会再长出“记忆快照”尾巴。
    */
   fun rememberConversation() {
     if (rememberBusy) return
@@ -676,9 +778,10 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
               ChatTurn(
                 "system",
                 "从下面这段对话里提取**值得长期记住**的信息，写成 Markdown 短条目（每条一行，以 - 开头）。" +
+                  "每条固定使用 `- 主题：内容` 的格式，主题要短、稳定、可复用（例如 称呼 / 爱好 / 项目 / 决定 / 偏好）。" +
                   "只收：身份、长期偏好、在做的事、已定下的结论、约定、忌讳。" +
                   "丢掉：寒暄、临时情绪、一次性的问题、已经推翻的中间过程。不要评论，不要解释，" +
-                  "最多 8 条；没有值得记的就只输出一行 `- （这段没有需要长期记住的内容）`。",
+                  "最多 8 条；没有值得记的就只输出 `NONE`。",
               ),
               ChatTurn("user", transcript),
             ),
@@ -693,27 +796,19 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
           }
         }
       val body = acc.trim()
-      if (body.isEmpty()) {
+      if (body.isEmpty() || body == "NONE") {
         rememberHint = "这次没记住，要不再点一次"
       } else {
-        val stamp =
-          java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
-            .format(java.util.Date())
-        val existing = Prompts.read(context, Prompts.Memory).trimEnd()
         val lines =
           body
             .lines()
             .map { it.trim() }
             .filter { it.isNotEmpty() && !it.startsWith("```") }
             .map { if (it.startsWith("-") || it.startsWith("#")) it else "- $it" }
-        val appended =
-          buildString {
-            if (existing.isNotEmpty()) append(existing).append("\n\n")
-            append("## 记忆快照 · ").append(stamp).append('\n')
-            lines.forEach { append(it).append('\n') }
-          }
-        Prompts.write(context, Prompts.Memory, appended)
-        rememberHint = "已写进 MEMORY.md（${lines.size} 条）"
+        val changed = Prompts.appendAutoMemory(context, lines)
+        rememberHint =
+          if (changed.isEmpty()) "没有新的内容需要写入"
+          else "已整理进 ${changed.joinToString(" / ")}（${lines.size} 条）"
       }
       rememberBusy = false
     }
@@ -755,12 +850,23 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
         System.currentTimeMillis(),
         model = selectedModelId,
       )
+    replyingId = replyId
 
     // 真正发出去的上下文（摘要 + 最近 N 条），别在流式过程中反复读整张列表。
     val turns = requestTurns(excludeId = replyId)
     // 联网搜索：设置里开的那个开关。开着时请求体只多一条 `web_search` 声明，
     // 搜索本身在上游做，客户端**不会**多发请求（见 LlmApi.chatStream 的注释）。
-    val webSearch = AppPrefs.webSearchEnabled(context)
+    //
+    // ⚠️ 只有实测支持原生联网的模型才发这条声明。DeepSeek 等上游会直接拒绝
+    // `tools:[{"type":"web_search"}]` 并返回 422；把不认识的字段硬塞过去不是“联网失败”，
+    // 而是整轮聊天一起失败。未检测也按不发送处理，优先保证聊天可用。
+    val searchProfile =
+      selectedProviderId?.let { pid ->
+        ai.lotus.app.data.ModelCapabilityStore.load(context, pid, selectedModelId)
+      }
+    val webSearch =
+      AppPrefs.webSearchEnabled(context) &&
+        searchProfile?.nativeWebSearch == ai.lotus.app.data.CapabilityStatus.Supported
     // 只有"这一档真的对应一个字段"时才传；不传 = 上游走它自己的默认。
     val effort = currentThinking[safeThinkingIndex].reasoningEffort
 
@@ -770,11 +876,13 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
      * 为什么不重试"吐了一半才断"的：那属于网络问题，重发会把半截回答接成两段，反而更脏。
      */
     // 自动记忆（同一次调用内完成，不额外发请求）：
-    //   模型在回复里带 `<!--memo: ...-->` → 这里把它剥掉、别显示给用户，收进 memoEntries，
-    //   流结束之后追加写进 MEMORY.md。见 Prompts.MemoryProtocol / splitMemos。
+    //   模型写隐藏标记 → 客户端剥掉后按语义分区：用户本人去 USER.md，其他长期事实去
+    //   MEMORY.md，项目/决定/教训等去 memory/ 档案柜。仍是一次模型调用，不额外发请求。
     val autoMemory = AppPrefs.autoMemoryEnabled(context)
     val imageReady = capabilities.ready(ai.lotus.app.data.CapabilityKind.Image)
     val memoEntries = mutableListOf<String>()
+    val userEntries = mutableListOf<String>()
+    var pendingArchives: List<ai.lotus.app.data.Prompts.ArchiveWrite> = emptyList()
     var imagePrompt: String? = null
     // 模型要求追加进自己提示词文件的内容（`<!--write: SOUL.md | …-->`）。
     var pendingWrites: List<ai.lotus.app.data.Prompts.FileWrite> = emptyList()
@@ -783,13 +891,24 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
     // 模型点名要取的记忆关键词（`<!--recall: …-->`）：下一轮按它们去档案柜里取段落。
     var pendingRecalls: List<String> = emptyList()
     var rawReply = ""
+    // 上游给的推理过程（没有就一直是空串 —— 那界面上不会出现"思考过程"那块）。
+    // ⚠️ 跟 rawReply 分开攒：推理里的文字**不参与**标记解析，别让思考过程里的半截
+    //    `<!--` 被当成指令。
+    var reasoningBuf = ""
+    // 上游报回来的"它读过哪些页面"（annotations / citations）。一把都没报就一直是空的 ——
+    // 聊天页那行「访问记录」就不会出现。**不拿正文里的链接冒充**。
+    val sourceBuf = linkedSetOf<String>()
 
     suspend fun runStream(attemptEffort: String?): Boolean {
       var gotText = false
       var failed = false
       // 重发时从头再来，别把上一次的残留标记接进这一轮。
       rawReply = ""
+      reasoningBuf = ""
+      sourceBuf.clear()
       memoEntries.clear()
+      userEntries.clear()
+      pendingArchives = emptyList()
       imagePrompt = null
       pendingWrites = emptyList()
       pendingTidy = emptyList()
@@ -806,6 +925,7 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
           val index = messages.indexOfFirst { it.id == replyId }
           if (index < 0) return@collect
           when (event) {
+            is ChatEvent.ModelInfo -> Unit
             is ChatEvent.Delta -> {
               gotText = true
               rawReply += event.text
@@ -814,11 +934,23 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
               val d = Prompts.splitDirectives(rawReply)
               memoEntries.clear()
               memoEntries += d.memos
+              userEntries.clear()
+              userEntries += d.users
+              pendingArchives = d.archives
               imagePrompt = d.image
               pendingWrites = d.writes
               pendingTidy = d.tidy
               pendingRecalls = d.recalls
               messages[index] = messages[index].copy(text = d.visible)
+            }
+            is ChatEvent.Sources -> {
+              // 上游报回了它读过的页面 —— 攒起来给"访问记录"那行用。
+              sourceBuf.addAll(event.urls)
+            }
+            is ChatEvent.Reasoning -> {
+              // 思考过程边收边显示：用户能在等答案的时候看见它真的在干活，而不是干等三个点。
+              reasoningBuf += event.text
+              messages[index] = messages[index].copy(reasoning = reasoningBuf)
             }
             is ChatEvent.Usage -> {
               // 服务端报的真实 prompt_tokens —— 存下来，用量面板从此显示实测值。
@@ -836,7 +968,10 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
               messages[index] =
                 messages[index].copy(text = "⚠️ ${event.message}".let { if (old.isBlank()) it else old })
             }
-            ChatEvent.Done -> Unit
+            ChatEvent.Done -> {
+              val i = messages.indexOfFirst { it.id == replyId }
+              if (i >= 0) messages[i] = messages[i].copy(at = System.currentTimeMillis())
+            }
           }
           // 每一片回来都落一次盘太费 IO，但流一结束必须落 —— 否则退出 App 就丢这次回答。
           if (event is ChatEvent.Done || event is ChatEvent.Failed) saveCurrent()
@@ -853,16 +988,18 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
         if (index >= 0) messages[index] = messages[index].copy(text = "")
         runStream(null)
       }
-      // 模型自己记下的东西 → 追加进 MEMORY.md（用户手写的内容永远排在前面，不被覆盖）。
+      // 模型自己记下的东西 → 按语义分开落盘。用户手写的内容永远不动。
+      val memoryFiles = linkedSetOf<String>()
       if (autoMemory) {
-        if (memoEntries.isNotEmpty()) {
-          Prompts.appendAutoMemory(context, memoEntries)
-        } else {
-          // 兜底：用户明确让"记住"，但模型漏写了标记 —— 本地照样存，免得它嘴上说记住了其实没存。
-          Prompts.memoryIntentFallback(
-            context,
-            messages.lastOrNull { it.fromUser }?.text.orEmpty(),
-          )
+        if (memoEntries.isNotEmpty()) memoryFiles += Prompts.appendAutoMemory(context, memoEntries)
+        if (userEntries.isNotEmpty()) memoryFiles += Prompts.appendUserMemory(context, userEntries)
+        if (memoEntries.isEmpty() && userEntries.isEmpty()) {
+          // 兜底：用户明确让“记住”，但模型漏写了标记 —— 本地照样存，免得它嘴上说记住了其实没存。
+          memoryFiles +=
+            Prompts.memoryIntentFallback(
+              context,
+              messages.lastOrNull { it.fromUser }?.text.orEmpty(),
+            )
         }
       }
       // 模型点名要的记忆 → 把关键词记在会话上，下一轮按它去档案柜里取段落。
@@ -887,17 +1024,22 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
             messages.lastOrNull { it.fromUser }?.text.orEmpty(),
           )
         }
-      if (wrote.isNotEmpty()) writeHint = "已追加进 " + wrote.joinToString(" / ")
+      val archived = Prompts.applyArchives(context, pendingArchives)
+      if (wrote.isNotEmpty()) writeHint = "已写入 " + wrote.joinToString(" / ")
+      if (memoryFiles.isNotEmpty()) writeHint = "已记住：" + memoryFiles.joinToString(" / ")
       // 整理：只覆盖 AI 自己写的那一段，用户手写的部分原样在前。
+      var tidied = false
       pendingTidy.take(1).forEach { w ->
         if (ai.lotus.app.data.Prompts.tidyFile(context, w.file, w.text)) {
           writeHint = "已整理 " + w.file.trim().uppercase() + ".md"
+          tidied = true
         }
       }
       // 生图：① 模型写了 `<!--image: …-->` 就用它；② 模型忘了写、但用户明说"画一张" → 直接用那句话。
       // 第 ② 条是兜底：不能把"能不能出图"全押在模型愿不愿意写标记上。
       val lastUserText = messages.lastOrNull { it.fromUser }?.text.orEmpty()
       val shot = imagePrompt ?: if (imageReady) Prompts.drawIntentPrompt(lastUserText) else null
+      var didImage = false
       if (imageReady && shot != null) {
         // 画图期间挂上"正在画图…"的指示 —— 生图要几十秒，没有指示用户会以为没反应。
         paintingId = replyId
@@ -905,11 +1047,63 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
         paintingId = null
         val i = messages.indexOfFirst { it.id == replyId }
         if (i >= 0) {
-          messages[i] =
-            if (res.path != null) messages[i].copy(imagePath = res.path)
-            else messages[i].copy(text = (messages[i].text + "\n\n⚠️ " + res.error).trim())
+          if (res.path != null) {
+            messages[i] = messages[i].copy(imagePath = res.path)
+            didImage = true
+          } else {
+            messages[i] = messages[i].copy(text = (messages[i].text + "\n\n⚠️ " + res.error).trim())
+          }
         }
         saveCurrent()
+      }
+      // ---- 这一轮 AI 到底动用了什么（**客户端自己记账**，不是听模型自吹）----
+      //
+      // 用户口径：「他会调用哪些工具（比如记忆等），这些得加上去，要不然太简陋了。」
+      // 所以这里把"真的发生了的动作"记在这条回答上，聊天页用一排小玻璃片显示出来。
+      // 只有**没发生就不写** —— 一排全是点亮的小标，比不写还误导人。
+      val usedTools =
+        buildList {
+          if (memoryFiles.contains("USER.md")) add("用户记忆")
+          if (memoryFiles.contains("MEMORY.md")) add("长期记忆")
+          if (wrote.any { it in setOf("IDENTITY.md", "SOUL.md", "AGENTS.md") }) add("设定")
+          if (archived.isNotEmpty()) add("归档")
+          if (tidied) add("整理")
+          if (webSearch) add("联网")
+          if (didImage) add("生图")
+        }
+      // 每个动作的**明细** —— 用户口径：「那些调用工具我也不能看详细内容」。
+      // 光一个"记住"标签看不出写了什么，所以把真正落盘的内容/文件名/画面描述都记下来。
+      val toolLog =
+        buildList {
+          if (memoryFiles.isNotEmpty()) {
+            val detail =
+              (userEntries + memoEntries).take(2).joinToString("；").take(90)
+                .ifBlank { memoryFiles.joinToString(" / ") }
+            add("记忆｜" + memoryFiles.joinToString(" / ") + " · " + detail)
+          }
+          val settingFiles = wrote.filter { it in setOf("IDENTITY.md", "SOUL.md", "AGENTS.md") }
+          if (settingFiles.isNotEmpty()) add("设定｜" + settingFiles.joinToString(" / "))
+          if (archived.isNotEmpty()) add("归档｜" + archived.joinToString(" / "))
+          if (tidied) {
+            val f = pendingTidy.firstOrNull()?.file?.trim()?.uppercase()
+            add("整理｜" + (f?.let { it + ".md" } ?: "记忆段"))
+          }
+          if (webSearch) {
+            // 上游回了页面明细 → 写清读了几页；没回 → **如实说没回**，不写"由服务端检索"这种
+            // 听着像真检索过的话（用户口径：「这功能必须要有」，但不许编）。
+            add(
+              if (sourceBuf.isNotEmpty()) "联网｜上游回了 ${sourceBuf.size} 个页面"
+              else "联网｜上游未返回页面明细"
+            )
+          }
+          if (didImage && !shot.isNullOrBlank()) add("生图｜" + shot.take(70))
+        }
+      val ti = messages.indexOfFirst { it.id == replyId }
+      if (ti >= 0) {
+        // 即使这一轮没有工具，也要把上游返回的来源落盘；否则界面明明拿到了 URL，
+        // 退出会话再回来就丢了。工具列表为空是事实，不补假数据。
+        messages[ti] =
+          messages[ti].copy(tools = usedTools, toolLog = toolLog, sources = sourceBuf.toList())
       }
       // 当天的对话流水：写进 md/memory/YYYY-MM-DD.md。**纯本地、零 token**（见 Prompts.appendDailyLog）。
       // 这就是 OpenClaw 那种"memory 里按天记日志"的路子 —— 只不过我们不把它塞回每轮请求里。
@@ -923,6 +1117,9 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
       }
       // 首轮答完 → 给这个会话起一个话题（一个会话只跑一次，见 summarizeTopic）。
       currentId?.let { summarizeTopic(it) }
+      // 落地后过程面板自动收起；保存时 updatedAt 已按最后一条消息时间更新。
+      if (replyingId == replyId) replyingId = null
+      saveCurrent()
     }
   }
 
@@ -937,6 +1134,14 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
     closeOverlays()
   }
 
+  /** 摘要覆盖到了将被截断的历史时，摘要已经失去前提，必须整段作废。 */
+  fun invalidateSummaryFrom(cutId: Long) {
+    val conv = conversations.firstOrNull { it.id == currentId } ?: return
+    if (conv.summary.isNotBlank() && conv.summaryUpTo >= cutId) {
+      updateConversation(conv.id) { it.copy(summary = "", summaryUpTo = 0L, promptTokens = 0) }
+    }
+  }
+
   /**
    * 编辑一条用户消息并重发：**从这条起**的历史全部丢掉，原文放回输入框让用户改。
    *
@@ -945,6 +1150,7 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
   fun editMessage(id: Long) {
     val idx = messages.indexOfFirst { it.id == id }
     if (idx < 0 || !messages[idx].fromUser) return
+    invalidateSummaryFrom(id)
     draft = messages[idx].text
     while (messages.size > idx) messages.removeAt(messages.lastIndex)
     saveCurrent()
@@ -957,6 +1163,7 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
   fun deleteMessage(id: Long) {
     val idx = messages.indexOfFirst { it.id == id }
     if (idx < 0) return
+    invalidateSummaryFrom(id)
     while (messages.size > idx) messages.removeAt(messages.lastIndex)
     saveCurrent()
     closeOverlays()
@@ -970,6 +1177,7 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
   fun regenerate(id: Long) {
     val idx = messages.indexOfFirst { it.id == id }
     if (idx < 0 || messages[idx].fromUser) return
+    invalidateSummaryFrom(id)
     while (messages.size > idx) messages.removeAt(messages.lastIndex)
     saveCurrent()
     requestReply()
@@ -1075,6 +1283,8 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
                   ),
                 userAvatarPath = userAvatarPath,
                 paintingId = paintingId,
+                replyingId = replyingId,
+                onOpenSources = { sourcesSheet = it },
                 // 长按气泡的动作：复制在聊天页本地做，其余三个回到这里改数据。
                 onQuote = { quoteMessage(it) },
                 onEdit = { editMessage(it) },
@@ -1108,11 +1318,6 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
               onRestoreArchived = { restoreArchived(it) },
               onPurgeArchived = { purgeArchived() },
               memoryFiles = Prompts.allMarkdown(context).size,
-              contextTurns = contextTurns,
-              onContextTurns = {
-                contextTurns = it
-                AppPrefs.setContextTurns(context, it)
-              },
               onOpenMd = { tab = LotusTab.Files },
               userAvatarPath = userAvatarPath,
               onUserAvatarChange = { userAvatarPath = AvatarStore.path(context) },
@@ -1123,6 +1328,7 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
               },
               checkingUpdate = updateChecking,
               onCheckUpdate = { runUpdateCheck() },
+              onBackupImported = { reloadImportedData() },
               bottomInset = bottomInset,
             )
         }
@@ -1197,17 +1403,26 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
               windowTokens = contextWindow,
               real = usageIsReal,
               messageCount = messages.size,
-              keepRecent = currentConversation?.keepRecent ?: 0,
               summaryChars = currentConversation?.summary?.length ?: 0,
               busy = compressing,
               onCompress = { compressContext() },
-              onTrim = { trimContext(it) },
               rememberBusy = rememberBusy,
               rememberHint = rememberHint,
               onRemember = { rememberConversation() },
               onNewChat = { chatPanelOpen = false; newChat() },
               onRename = { chatPanelOpen = false; renaming = true },
               onDelete = { chatPanelOpen = false; deleting = true },
+              onTools = { chatPanelOpen = false; toolsOpen = true },
+              // 行尾小字只报"配好的外围能力有几项"，不假报常开的那些。
+              toolsHint =
+                listOf(
+                    capabilities.ready(ai.lotus.app.data.CapabilityKind.Image),
+                    capabilities.ready(ai.lotus.app.data.CapabilityKind.Video),
+                    capabilities.ready(ai.lotus.app.data.CapabilityKind.Search),
+                    capabilities.ready(ai.lotus.app.data.CapabilityKind.Ocr),
+                  )
+                  .count { it }
+                  .let { "$it/4 已配" },
               modifier = Modifier.align(Alignment.TopEnd).padding(end = 14.dp, top = 62.dp),
             )
           }
@@ -1431,6 +1646,45 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
               onConfirm = { deleteConversation() },
               onDismiss = { deleting = false },
             )
+          }
+
+          // ⓪-4a 来源列表 → 应用内阅读器。
+          sourcesSheet?.let { urls ->
+            GlassSourcesSheet(
+              urls = urls,
+              onOpen = { url ->
+                sourcesSheet = null
+                readerUrl = url
+              },
+              onDismiss = { sourcesSheet = null },
+            )
+          }
+
+          // ⓪-4a 应用内阅读器：点消息底部的来源 → 在这里打开它读过的页面。
+          readerUrl?.let { url ->
+            ai.lotus.app.ui.reader.ReaderScreen(url = url, onClose = { readerUrl = null })
+          }
+
+          // ⓪-4b 「工具」那一页。
+          if (toolsOpen) {
+            GlassToolsPanel(
+              webSearch = AppPrefs.webSearchEnabled(context),
+              searchReady = capabilities.ready(ai.lotus.app.data.CapabilityKind.Search),
+              imageReady = capabilities.ready(ai.lotus.app.data.CapabilityKind.Image),
+              videoReady = capabilities.ready(ai.lotus.app.data.CapabilityKind.Video),
+              ocrReady = capabilities.ready(ai.lotus.app.data.CapabilityKind.Ocr),
+              onDismiss = { toolsOpen = false },
+            )
+          }
+
+          // 保存 / 归档的轻量确认。放在内容层，能真实采样并模糊页面。
+          AnimatedVisibility(
+            visible = transientToast != null,
+            enter = fadeIn(tween(140)) + slideInVertically(tween(180)) { it / 3 },
+            exit = fadeOut(tween(160)) + slideOutVertically(tween(170)) { it / 4 },
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 154.dp),
+          ) {
+            GlassToast(text = transientToast.orEmpty())
           }
 
           // ⓪-5 「检查更新」的结果弹层。跟上面两个一样，**放最后 = 画在最上层**，

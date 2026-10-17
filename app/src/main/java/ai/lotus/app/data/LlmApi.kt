@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -112,8 +113,21 @@ data class ChatTurn(
 
 /** 流式聊天里往外吐的东西。 */
 sealed interface ChatEvent {
+  /** 上游在响应里回显的实际模型名。用来核对中转站有没有换模型。 */
+  data class ModelInfo(val model: String) : ChatEvent
+
   /** 增量文本（可能是半个字、半个词）。 */
   data class Delta(val text: String) : ChatEvent
+
+  /**
+   * **推理过程**的增量（模型的"思考"）。
+   *
+   * ⚠️ 不是所有上游都吐这个：
+   *  - 吐的（DeepSeek / Qwen / 多数国内兼容网关）：`delta.reasoning_content`；
+   *  - 另一些（OpenRouter 一类）：`delta.reasoning`；
+   *  - 不吐的：这一轮只有正文 —— 那就**如实什么都不显示**，绝不拿正文假装思考过程。
+   */
+  data class Reasoning(val text: String) : ChatEvent
 
   /**
    * **服务端报的真实用量**（`usage.prompt_tokens` / `completion_tokens`）。
@@ -123,6 +137,15 @@ sealed interface ChatEvent {
    * 提供方不支持时这一帧不会来，那就只能退回估算值（UI 上必须标出来）。
    */
   data class Usage(val promptTokens: Int, val completionTokens: Int) : ChatEvent
+
+  /**
+   * **它真的读过哪些网页** —— 上游在流里回的 `annotations`（URL 引用）。
+   *
+   * ⚠️ 两种实现都有：有的把 `annotations` 挂在 `delta` 上、有的挂在整帧上，所以下面两个位置都认。
+   *    一把 URL 都没回（比如刚实测的 mzhcloud + deepseek）：**就什么都不发**，
+   *    聊天页那行"访问记录"整行不出现 —— 不许拿正文里的链接冒充。
+   */
+  data class Sources(val urls: List<String>) : ChatEvent
 
   /** 失败，带一句能直接给用户看的原因。 */
   data class Failed(val message: String) : ChatEvent
@@ -244,18 +267,33 @@ fun LlmApi.chatStream(
       return@flow
     }
 
+    var serverStreamError = ""
     conn.inputStream.bufferedReader().use { reader ->
       var line = reader.readLine()
-      while (line != null) {
+      stream@ while (line != null) {
         if (line.startsWith("data:")) {
           val payload = line.removePrefix("data:").trim()
           if (payload == "[DONE]") break
+          streamError(payload)?.let {
+            serverStreamError = it
+            break@stream
+          }
+          responseModel(payload)?.let { emit(ChatEvent.ModelInfo(it)) }
           parseUsage(payload)?.let { emit(it) }
+          // 先推理、后正文：上游通常先吐一段 reasoning_content，正文才跟着来。
+          val reason = deltaReasoning(payload)
+          if (reason.isNotEmpty()) emit(ChatEvent.Reasoning(reason))
           val text = deltaText(payload)
           if (text.isNotEmpty()) emit(ChatEvent.Delta(text))
+          val cites = deltaSources(payload)
+          if (cites.isNotEmpty()) emit(ChatEvent.Sources(cites))
         }
         line = reader.readLine()
       }
+    }
+    if (serverStreamError.isNotBlank()) {
+      emit(ChatEvent.Failed("上游流错误：${serverStreamError.take(220)}"))
+      return@flow
     }
     emit(ChatEvent.Done)
   } catch (t: Throwable) {
@@ -264,6 +302,30 @@ fun LlmApi.chatStream(
     conn?.disconnect()
   }
 }.flowOn(Dispatchers.IO)
+
+/** 从 SSE 帧顶层读取 `model`。没有就返回 null，不拿请求参数冒充响应回显。 */
+private fun responseModel(payload: String): String? =
+  runCatching {
+      val root = SseJson.parseToJsonElement(payload).jsonObject
+      (root["model"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+    }
+    .getOrNull()
+
+/** SSE 有时 HTTP 200，但 data 里放的是 error 对象。不能把这种响应当成成功。 */
+private fun streamError(payload: String): String? =
+  runCatching {
+      val root = SseJson.parseToJsonElement(payload).jsonObject
+      val error = root["error"] ?: return null
+      when (error) {
+        is JsonPrimitive -> error.contentOrNull
+        is JsonObject ->
+          (error["message"] as? JsonPrimitive)?.contentOrNull
+            ?: (error["code"] as? JsonPrimitive)?.contentOrNull
+            ?: error.toString()
+        else -> error.toString()
+      }?.takeIf { it.isNotBlank() }
+    }
+    .getOrNull()
 
 /**
  * 从一帧 SSE 里抠 `usage`。没有 usage 就返回 null（绝大多数帧都没有，只有流末尾那一帧有）。
@@ -300,3 +362,81 @@ private fun deltaText(payload: String): String =
       (delta["content"] as? JsonPrimitive)?.contentOrNull.orEmpty()
     }
     .getOrDefault("")
+
+/** 推理字段的常见叫法，按优先级试。 */
+private val ReasoningKeys = listOf("reasoning_content", "reasoning", "reasoning_text")
+
+/**
+ * 从一条 SSE 分片里抠出**推理增量**。
+ *
+ * 各家命名不统一，所以三个都认；一个都没有就返回空串 —— 调用方据此什么都不发。
+ */
+private fun deltaReasoning(payload: String): String =
+  runCatching {
+      val root = SseJson.parseToJsonElement(payload).jsonObject
+      val choices = root["choices"] as? JsonArray ?: return ""
+      val first = choices.firstOrNull() as? JsonObject ?: return ""
+      val delta = first["delta"] as? JsonObject ?: return ""
+      for (k in ReasoningKeys) {
+        val v = (delta[k] as? JsonPrimitive)?.contentOrNull
+        if (!v.isNullOrEmpty()) return v
+      }
+      ""
+    }
+    .getOrDefault("")
+
+/**
+ * 从一帧 SSE 里抠 `annotations` 里的 URL 引用。
+ *
+ * 兼容三种挂法（实测各家不统一，多认几种不吃亏）：
+ *  - `choices[0].delta.annotations[].url_citation.url`（OpenAI 流式）
+ *  - `choices[0].message.annotations[].url_citation.url`（非流式 / 有的网关流式也这么发）
+ *  - 顶层 `citations[]` / `search_results[].url`（部分网关自己起的名）
+ *
+ * 一个都没解析到就返回空列表 —— 调用方据此什么都不发。
+ */
+private fun deltaSources(payload: String): List<String> =
+  runCatching {
+      val root = SseJson.parseToJsonElement(payload).jsonObject
+      val out = LinkedHashSet<String>()
+
+      fun eatAnnotations(el: JsonElement?) {
+        val arr = el as? JsonArray ?: return
+        arr.forEach { item ->
+          val obj = item as? JsonObject ?: return
+          // OpenAI：{type:"url_citation", url_citation:{url,title}}
+          val cite = obj["url_citation"] as? JsonObject
+          if (cite != null) {
+            urlOf(cite["url"])?.let { out.add(it) }
+            return@forEach
+          }
+          // 有的直接摊平：{url, title}
+          urlOf(obj["url"])?.let { out.add(it) }
+        }
+      }
+
+      (root["choices"] as? JsonArray)?.forEach { ch ->
+        val c = ch as? JsonObject ?: return@forEach
+        val d = c["delta"] as? JsonObject
+        eatAnnotations(d?.get("annotations"))
+        val m = c["message"] as? JsonObject
+        eatAnnotations(m?.get("annotations"))
+      }
+      eatAnnotations(root["annotations"])
+      (root["citations"] as? JsonArray)?.forEach { item ->
+        when (item) {
+          is JsonPrimitive -> urlOf(item)?.let { out.add(it) }
+          is JsonObject -> urlOf(item["url"])?.let { out.add(it) }
+          else -> Unit
+        }
+      }
+      (root["search_results"] as? JsonArray)?.forEach { item ->
+        val o = item as? JsonObject ?: return@forEach
+        urlOf(o["url"])?.let { out.add(it) }
+      }
+      out.toList()
+    }
+    .getOrDefault(emptyList())
+
+private fun urlOf(el: JsonElement?): String? =
+  (el as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.startsWith("http") }

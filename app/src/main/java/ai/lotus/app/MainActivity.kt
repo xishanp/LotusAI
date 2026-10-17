@@ -2,7 +2,9 @@ package ai.lotus.app
 
 import ai.lotus.app.ui.LotusApp
 import ai.lotus.app.ui.LotusSplash
+import ai.lotus.app.data.AppPrefs
 import ai.lotus.app.data.Prompts
+import ai.lotus.app.ui.onboarding.LotusOnboarding
 import ai.lotus.app.ui.theme.LotusTheme
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -41,9 +43,14 @@ class MainActivity : ComponentActivity() {
     // **已存在的文件一个字节都不动** —— 用户改过就是用户的。放在 setContent 之前，
     // 保证 UI 第一帧读到的就是铺好的内容。
     Prompts.ensureDefaults(this)
+    Prompts.reclassifyAutoMemory(this)
     setContent {
       LotusTheme {
         var showSplash by remember { mutableStateOf(true) }
+        // 初始化只走一次；清应用数据后会重新进入这里。
+        var onboardingCompleted by remember {
+          mutableStateOf(AppPrefs.onboardingCompleted(this@MainActivity))
+        }
         // 首页立绘的布局矩形（root px）。首页在启动页底下渲染，第一帧就能量到；
         // 启动页用它把"长大后的立绘"摆到首页立绘上 —— 见 ui/SplashScreen.kt 的 heroTransform。
         var homeArt by remember { mutableStateOf<Rect?>(null) }
@@ -59,8 +66,17 @@ class MainActivity : ComponentActivity() {
           )
 
         Box(Modifier.fillMaxSize()) {
-          // 首页照常渲染（在启动页底下），淡出即用完。
-          LotusApp(onHomeArtBounds = { homeArt = it })
+          // 首启先接模型，再由小莲用真实对话完成初始化；之后才进入主界面。
+          if (onboardingCompleted) {
+            LotusApp(onHomeArtBounds = { homeArt = it })
+          } else {
+            LotusOnboarding(
+              onComplete = {
+                AppPrefs.setOnboardingCompleted(this@MainActivity, true)
+                onboardingCompleted = true
+              }
+            )
+          }
           // ⚠️ 这里**不做**入场缩放：系统启动页里的立绘已经是 100%，
           // 这里再从 94% 放大的话，交接那一帧会看见"弹一下"。两边必须逐像素一致。
           if (splashAlpha > 0.002f) {

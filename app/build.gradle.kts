@@ -8,12 +8,18 @@ android {
   namespace = "ai.lotus.app"
   compileSdk = 37
 
+  lint {
+    // 版本号沿用 YYYYMMDDNN，保证已安装版本可以连续覆盖升级。
+    // Android 的 Int versionCode 上限决定了日期方案最终会逼近上限，因此只关闭这一条结构性检查。
+    disable += "HighAppVersionCode"
+  }
+
   defaultConfig {
     applicationId = "ai.lotus.app"
     minSdk = 28
     targetSdk = 35
-    versionCode = 2026101101
-    versionName = "2026.10.11"
+    versionCode = 2026101901
+    versionName = "2026.10.19"
   }
 
   buildTypes {

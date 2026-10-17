@@ -4,10 +4,18 @@
 
 <h1 align="center">Lotus AI</h1>
 
-<h3 align="center">Pure chat · Liquid Glass everywhere · AI with real memory, for Android</h3>
+<p align="center">
+  <strong>When conversation remembers, glass begins to breathe.</strong>
+</p>
 
 <p align="center">
-  <a href="README.md">中文</a> · <b>English</b>
+  Android · Liquid Glass everywhere · Markdown persona and memory · OpenAI-compatible
+</p>
+
+<p align="center">
+  <a href="README.md">中文</a> · <b>English</b> ·
+  <a href="../../releases/latest">Download APK</a> ·
+  <a href="CHANGELOG.md">Changelog</a>
 </p>
 
 <p align="center">
@@ -19,201 +27,189 @@
 
 ---
 
-## What it is
+## About Lotus AI
 
-**Lotus AI** is an Android AI chat app. It does exactly one thing: **chat**.
+Lotus AI is an AI conversation space designed for Android.
 
-The whole interface is one continuous sheet of liquid glass, and the conversation itself is light,
-fast and cheap — one question is one model call. The request carries nothing but
-*your persona, your memories, and what you actually said*.
+It brings together the things that shape everyday conversation: a restrained Liquid Glass interface, a stable personality you can rewrite, Markdown memory you can maintain for years, transparent context costs, and model access without vendor lock-in.
 
-It remembers you, and it has a stable personality — because both live in **plain Markdown files you
-can open and edit**. The model can write to them, and you can replace them with your own.
+You choose the model. You define the persona. Your memories stay on your device. There are no crowded toolbars and no hidden context consumption.
 
-## What it is not
+## Why Lotus AI
 
-- **Not an agent.** No tool loop, no background jobs, no wall of tool descriptions stuffed into every
-  turn. One question = one request. That is why it is cheap on tokens and quick to answer.
-- **No vendor baked in.** Base URL, API key and model list are yours to fill in. It speaks the
-  OpenAI-compatible protocol.
-- **No account, no telemetry.** Your keys and conversations stay on your device.
+### Liquid Glass, not a blurred layer
 
-## Highlights
+Lotus AI's glass is a material system that runs through the entire interface, not a translucent background with a blur stacked on top.
 
-### Light on tokens
+- **Light blur, edge refraction and chromatic dispersion** remain visible even on a white canvas.
+- Controls scale on press, lean toward the finger and gently interact with nearby glass.
+- Panels, the composer, menus, dialogs and the reader share one visual language.
+- The interface stays quiet at rest, then releases refraction, stretching and soft highlights only when touched.
 
-- The request body contains three things only: **persona prompts**, **memory**, **history**.
-- Memory is **tiered** by default: three must-read files (`IDENTITY` / `SOUL` / `AGENTS`), the
-  "hot pointer" summary at the top of `MEMORY.md` (hard-capped at 900 characters), and an
-  on-demand archive. The whole archive is *not* pushed into every turn.
-- Live context usage, per-conversation **trim / compress**. Compression only rewrites the summary —
-  nothing is deleted.
+Glass should help content breathe, not take attention away from it.
 
-### Fast, with thinking kept intact
+### A persona and memory system you can actually maintain
 
-- SSE streaming, rendered as it arrives.
-- Reasoning tiers are **mapped to what the model actually supports** — as many as it has, from
-  `none` all the way to `max` / `ultra`, no more, no fewer.
+Lotus AI does not hide memory in an opaque database. Persona, preferences and long-term memory are Markdown files that you can open and edit directly:
 
-### Real memory — a complete Markdown framework
+```text
+filesDir/md/
+├── IDENTITY.md      who the assistant is and how it refers to itself
+├── SOUL.md          personality, tone, taste and expression
+├── AGENTS.md        rules and boundaries
+├── USER.md          your name, preferences and long-term profile
+├── MEMORY.md        durable facts, agreements and relationship context
+├── CAPABILITIES.md  current capabilities and usage notes
+└── memory/          detailed archive for projects, decisions, facts and lessons
+```
 
-- Persona and memory are plain text, editable from the **Files** tab.
-- **Automatic recall**: when the model wants to remember something long-term it emits a hidden
-  marker, and the client strips it out of the **same** response and appends it to `MEMORY.md` —
-  no second request, no extra tokens.
-- **Manual memory**: `⋯ → remember this` in a chat compresses the conversation into a few
-  long-term notes.
-- **Auto-titled conversations**: the first reply of every conversation generates its title.
+When prompts and memory are enabled, `IDENTITY / SOUL / AGENTS / USER / MEMORY` are read in full on every turn. `memory/` remains a detailed archive instead of being forced into every request.
 
-### A personality you can rewrite
+The model can write hidden markers inside the same response. The client extracts them and merges each entry **in place by topic** into the correct file instead of appending snapshot after snapshot. You can also choose “Remember this” from a conversation, or edit any file yourself from the Files workspace.
 
-- Name, tone, rules and boundaries are Markdown. Change them and they take effect immediately.
-- The model can **tidy its own memory section** — it only ever overwrites the part it wrote; text
-  you wrote by hand stays on top, byte for byte.
+A persona is not a one-time setting. It can be tuned through conversation, cleared, backed up and moved to another device.
 
-### Liquid Glass — one visual language
+### Context you can see and control
 
-- Every pane uses one recipe: **light blur + edge refraction + chromatic dispersion + inner
-  highlight + soft outer shadow**. Pure white canvas, no colour tints.
-- **No second sheet of glass inside another sheet**: buttons nested in a pane are invisible at rest
-  and only surface their refraction and scale while pressed.
-- Every control responds for real — press scale, lean toward the finger, gently nudging its
-  neighbours.
+Lotus AI distinguishes between **real token usage returned by the server** and clearly labelled estimates when the upstream does not return usage. It never presents an estimate as a billed result.
 
-### The features a chat app should have
+- Set a context window for every model provider.
+- See current context occupancy and remaining space per conversation.
+- Compress context without deleting the transcript: the summary covers processed messages, while later requests send the summary plus newer messages.
+- Optionally show model, avatar, completion time, token count and character count beneath each reply.
+- Each turn sends the active persona, memory, summary and conversation messages that still fit the context, rather than unrelated payloads.
 
-- **Long-press a message** → copy / quote / edit-and-resend / regenerate / retract.
-- **Long-press the text** → select / copy / select all (system text selection).
-- Attachments: image / video / file. Models with vision can see the image you send.
-- Image generation: configure an image endpoint, then just say "draw me …". A glass placeholder
-  animates while it works, and the picture eases from blurred to sharp.
-- Web search: optional. When enabled the request body gains exactly one entry,
-  `tools:[{"type":"web_search"}]` — the search happens upstream, the client still makes **one** call.
+### Your models, with capabilities based on real results
+
+Lotus AI uses the common OpenAI-compatible protocol and does not lock you to one model vendor.
+
+- Configure any number of providers, each with its own Base URL, API key, model list and context window.
+- Load the model catalogue through `/models` and run a connection test.
+- Chat through `/chat/completions` with streaming and real upstream reasoning fields such as `reasoning_content`, `reasoning` and `reasoning_text`.
+- Reasoning levels are not decorative. The client verifies each candidate level against the upstream and only exposes the levels the model actually accepts.
+- Probe image input, native web search, and whether the relay's reported model identity matches the selected model.
+- Connect image generation through a separate multimodal endpoint. Generation progress appears inside the conversation and the finished image lands in the message.
+- Native web search is enabled only after the model passes a real capability check, so unsupported tool declarations cannot break an ordinary chat turn.
+
+### The details a conversation deserves
+
+- Server-sent streaming, rendered as soon as the first token arrives.
+- Real reasoning and tool activity expand while answering and collapse afterward; tap Lotus's avatar to inspect them again.
+- Message actions include copy, quote, edit-and-resend, regenerate and retract.
+- Long-press text for system selection, copy and select-all.
+- Web sources open in an in-app reader without leaving the conversation.
+- Add images, videos and files directly from the composer.
+- Conversations receive automatic titles and support rename, archive, restore and permanent deletion.
+- First-run onboarding connects the primary model and then completes a real conversation to initialize your name, language and expression preferences.
+
+### Local-first, portable by design
+
+- No account and no telemetry.
+- API keys and conversation data live in the app's private storage.
+- Export conversations, providers, Markdown files, avatars and images as password-encrypted backup. A wrong password cannot overwrite existing data.
+- The complete source is open under the Apache License 2.0.
 
 ## Screenshots
 
 | Home | Chat |
 | --- | --- |
-| <img src="assets/screenshots/home.png" width="330"> | <img src="assets/screenshots/chat.png" width="330"> |
+| <img src="assets/screenshots/home.png" width="330" alt="Lotus AI home"> | <img src="assets/screenshots/chat.png" width="330" alt="Lotus AI chat"> |
 
-| Files (persona & memory) | About |
+| Persona and memory files | Model capability probe |
 | --- | --- |
-| <img src="assets/screenshots/files.png" width="330"> | <img src="assets/screenshots/about.png" width="330"> |
+| <img src="assets/screenshots/files.png" width="330" alt="Lotus AI persona and memory files"> | <img src="assets/screenshots/model.png" width="330" alt="Lotus AI model capability results"> |
 
-## Memory and persona: a set of Markdown files
+## Quick start
 
+### Requirements
+
+- Android 8.0 (API 28) or newer
+- JDK 17
+- Android SDK Platform 37
+
+### Build
+
+```bash
+git clone https://github.com/xishanp/LotusAI.git
+cd LotusAI
+./gradlew :app:assembleDebug
 ```
-filesDir/md/
-├── IDENTITY.md   who I am        ← injected every turn
-├── SOUL.md       how I speak     ← injected every turn
-├── AGENTS.md     rules & bounds  ← injected every turn
-├── USER.md       about you       ← on demand
-├── MEMORY.md     long-term       ← hot pointer every turn, the rest on demand
-├── CAPABILITIES.md  what I can and cannot do (for humans, not injected)
-└── memory/       archive (not injected, retrieved on demand)
-    facts · decisions · lessons · projects · references · tasks · temporary
+
+Install the debug build:
+
+```bash
+adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Three-tier reading, which is where the token savings come from:
-
-1. **Must read** — `IDENTITY` / `SOUL` / `AGENTS`: persona and rules are always present.
-2. **Hot pointer** — the summary block at the top of `MEMORY.md`, hard-capped at 900 characters.
-3. **On demand** — `USER.md`, the rest of `MEMORY.md`, and the `memory/` archive. The client first
-   matches your own words character-wise; when the model needs deeper recall it emits a retrieval
-   marker and the archive opens.
-
-## Model setup
-
-- **Protocol**: OpenAI-compatible (`/chat/completions` streaming, `/models`, `/images/generations`).
-- **Providers**: as many as you like; each stores its own base URL, key and model list, with a
-  "test connection" button.
-- **Default model / chat settings**: model, reasoning tier, usage display, user avatar, per-message
-  timing and token counts.
-- **Side capabilities**: web search, image generation, video, OCR — all **optional** and separately
-  configured; leave them empty and they cost nothing per turn.
+After first launch, follow onboarding and enter the OpenAI-compatible `Base URL` (usually ending in `/v1`), `API Key` and model id. Once the primary model connects, you can start chatting.
 
 ## Tech stack
 
 | Layer | Choice |
 | --- | --- |
-| Language / UI | Kotlin 2.4.20 · Jetpack Compose (BOM 2026.09.00) |
+| Language / UI | Kotlin 2.4.20 · Jetpack Compose BOM 2026.09.00 |
 | Build | AGP 9.4.1 · Gradle 9.7.1 · JDK 17 |
-| Minimum | Android 8.0 (API 28); `compileSdk 37` / `targetSdk 35` |
-| Network / serialization | `HttpURLConnection` + hand-written SSE parsing · kotlinx.serialization |
-| Liquid Glass | `io.github.kyant0:backdrop` + `io.github.kyant0:shapes` + `dev.chrisbanes.haze` |
-| Storage | local JSON (providers / conversations) + plain-text Markdown (persona & memory) |
+| Platform | Android 8.0+ · `compileSdk 37` · `targetSdk 35` |
+| Networking | `HttpURLConnection` + hand-written SSE parsing |
+| Serialization | kotlinx.serialization |
+| Liquid Glass | Kyant0 `backdrop` / `shapes` + Chris Banes `haze` |
+| Storage | Local JSON + plain-text Markdown |
 
 ## Project layout
 
-```
+```text
 app/src/main/java/ai/lotus/app/
-├── MainActivity.kt              entry point
-├── data/                        data layer, UI-free
-│   ├── LlmApi.kt                OpenAI-compatible client (SSE)
-│   ├── Provider.kt              providers / model list / connection test
-│   ├── Conversation.kt          conversations and messages
-│   ├── Prompts.kt               prompt injection · tiered memory · recall
-│   ├── ImageGen.kt              /images/generations
-│   ├── Capabilities.kt          search / image / video / OCR config
-│   ├── ThinkingTiers.kt         real reasoning-tier mapping
-│   └── UpdateChecker.kt         GitHub Releases update check
+├── MainActivity.kt              app entry and system splash hand-off
+├── data/
+│   ├── LlmApi.kt                OpenAI-compatible streaming chat
+│   ├── Provider.kt              multi-provider setup and selection persistence
+│   ├── Prompts.kt               persona, memory, context and hidden write protocol
+│   ├── ModelCapabilities.kt     vision, web search and model identity probes
+│   ├── ThinkingTiers.kt         real reasoning-level probing
+│   ├── ImageGen.kt              in-conversation image generation
+│   ├── BackupManager.kt         encrypted import and export
+│   └── Changelog.kt             in-app release notes
 └── ui/
-    ├── LotusApp.kt              shell / routing / fixed layers
-    ├── glass/                   ★ glass infrastructure (Glass.kt is the single source of truth)
-    ├── home/                    home · composer · overlays
-    ├── chat/                    chat · bubbles · generation placeholder
-    ├── nav/                     bottom bar (chat / files / settings)
-    ├── settings/                settings
-    ├── md/                      Markdown workspace (persona & memory)
-    └── model/                   model catalogue
+    ├── LotusApp.kt              app shell and fixed layers
+    ├── glass/                   Liquid Glass infrastructure
+    ├── home/                    home, composer and overlays
+    ├── chat/                    chat, message actions and generation animation
+    ├── onboarding/              first-run onboarding
+    ├── md/                      Markdown persona and memory workspace
+    ├── reader/                  in-app source reader
+    ├── settings/                models, memory, data and about
+    └── nav/                     bottom navigation
 ```
-
-## Build and run
-
-```bash
-# JDK 17 and an Android SDK with compileSdk 37
-./gradlew :app:assembleDebug
-adb install -r app/build/outputs/apk/debug/app-debug.apk
-```
-
-On first launch: **Settings → Providers → Add**, enter the base URL (up to `/v1`) and your API key,
-tap **Test connection** to pull the model list, then pick a model on the home screen and chat.
 
 ## Versions and updates
 
-- **Settings → About → Check for updates** reads the `latest` GitHub Release tag and compares it with
-  the installed version. If there is something newer you get a "Go download" button that opens the
-  release page — the app never installs an APK behind your back.
-- To ship: keep `versionName` in `app/build.gradle.kts` (e.g. `2026.10.18`) in step with the release
-  tag (`v2026.10.18`). The app picks it up automatically.
+Current version: `2026.10.19`
+
+**Settings → About → Check for updates** reads the latest GitHub Release and compares it with the installed version. When a new version is available, it opens the release page and never installs an APK silently in the background.
+
+See [CHANGELOG.md](CHANGELOG.md) for the complete release history, or open **Settings → About → Version log** inside the app.
 
 ## Artwork
 
-Every illustration and design file we use lives in one place:
-
-| Mascot | Thinking | Reading MD |
+| Lotus | Thinking | Reading Markdown |
 | --- | --- | --- |
-| <img src="assets/gallery/01-mascot.png" width="230"> | <img src="assets/gallery/02-thinking.png" width="230"> | <img src="assets/gallery/03-md-reading.png" width="230"> |
+| <img src="assets/gallery/01-mascot.png" width="230" alt="Lotus AI mascot"> | <img src="assets/gallery/02-thinking.png" width="230" alt="Lotus AI thinking"> | <img src="assets/gallery/03-md-reading.png" width="230" alt="Lotus AI reading Markdown"> |
 
 | App icon | Home design sheet |
 | --- | --- |
-| <img src="assets/gallery/04-app-icon.png" width="230"> | <img src="assets/gallery/05-home-approved.png" width="330"> |
+| <img src="assets/gallery/04-app-icon.png" width="230" alt="Lotus AI app icon"> | <img src="assets/gallery/05-home-approved.png" width="330" alt="Lotus AI home design"> |
 
 ## License
 
-Released under the **Apache License 2.0** — see [LICENSE](LICENSE).
-Third-party dependencies and assets are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Released under the [Apache License 2.0](LICENSE). Third-party dependencies and assets are documented in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Credits
 
-Liquid Glass is not something a single `blur()` call can produce. The refraction, dispersion and
-blur all stand on these upstreams:
+Liquid Glass refraction, dispersion, blur and highlights build on these excellent open-source projects:
 
 | Project | Used for | License |
 | --- | --- | --- |
-| [Kyant0/AndroidLiquidGlass](https://github.com/Kyant0/AndroidLiquidGlass) (`io.github.kyant0:backdrop` / `shapes`) | refraction / dispersion / blur / highlight / shadow | Apache-2.0 |
-| [chrisbanes/haze](https://github.com/chrisbanes/haze) | blur foundation | Apache-2.0 |
+| [Kyant0/AndroidLiquidGlass](https://github.com/Kyant0/AndroidLiquidGlass) | refraction, dispersion, highlights and shape foundation | Apache-2.0 |
+| [chrisbanes/haze](https://github.com/chrisbanes/haze) | blur and material foundation | Apache-2.0 |
 
----
-
-**A new build every 7 days.**
+Thanks also to every open-source author making expression on Android better.

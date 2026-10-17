@@ -11,6 +11,7 @@ import ai.lotus.app.ui.theme.LotusPalette
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.EaseOut
 import androidx.compose.animation.core.spring
+import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -24,6 +25,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -41,7 +43,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.GraphicsLayerScope
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -72,6 +78,36 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 
+/**
+ * 🔒 **底栏玻璃泡 —— 现行标准配方 v3（2026-10-16 晚，照上游逐行对齐）**
+ *
+ * 上游：`Kyant0/AndroidLiquidGlass`（Apache-2.0），分支 `kmp`，文件
+ * `app/src/commonMain/kotlin/com/kyant/backdrop/catalog/components/LiquidBottomTabs.kt`。
+ * **这一版的三个节点就是照它还原的**，别再凭感觉调。
+ *
+ * ## 三个节点（顺序不能乱：① 可见 → ② 录制 → ③ 泡）
+ *
+ * 1. **① 外栏（可见）**：`drawBackdrop(页面) { vibrancy(); blur(...); lens(...) }` + 霜面 + 描边 + 图标。
+ * 2. **② 折射源（`alpha(0f)` + `layerBackdrop(tabsBackdrop)`，眼睛看不见）**：
+ *    把**整条底栏的玻璃再画一遍**（`vibrancy() + blur(...) + 表面色`），
+ *    **图标画在这层玻璃之上**，末尾 `ColorFilter.tint` **只染图标**。
+ * 3. **③ 玻璃泡**：`drawBackdrop(backdrop = combined(页面, ②)) { lens(...) }` —— **只折，不糊**。
+ *
+ * ## 为什么必须是这样（血泪，别重复试错）
+ *
+ * - 用户口径「背景只有折射没有模糊」：**模糊在 ② 里**（那层玻璃把页面糊了一遍），不在泡里。
+ *   所以泡里折到的是"已经糊好的底"，而图标是纹理里**本来就清晰**的像素 —— 互不干扰。
+ *   · 把 `blur` 加到**泡自己**那层 → 图标跟着糊（用户：「像在一块玻璃后面」）——**错**。
+ *   · 把 ② 只当"图标层"录（前几版就是这么写的）→ 泡里没模糊、只剩图标 ——**也错**。
+ * - 用户口径「泡的上下两面粘齿轮残片」：采样源只有 ②（纹理比泡小）时，lens 往边缘外
+ *   采样就采到边界残留。上游采样 `combined(页面, ②)` —— **页面那半是全屏的**，永远有像素可采。
+ *   所以 ③ 的采样源**必须是 combined(页面, ②)**，不许只写 ②。
+ * - `lens` 上限定在按下 14dp/20dp：再大就把图标自己压进边缘折射带里（= 残影）。
+ *
+ * 逐字备份：`output/golden/LotusBottomBar.LOCKED-v3-2026-10-16.kt`
+ * 基线图：`output/golden/baseline-v3-{rest,pressed-home,pressed-settings}.png`
+ * 历史：v1（单层泡）与 v2（自创"外壳层"）都已被上面几条否掉，只作存档。
+ */
 /**
  * Lotus AI 底部导航（四个 tab、**只有图标没有文字**）。
  *
@@ -161,8 +197,10 @@ fun LotusBottomBar(
             val targetIndex = targetValue.fastRoundToInt().fastCoerceIn(0, tabsCount - 1)
             currentIndex = targetIndex
             animateToValue(targetIndex.toFloat())
-            // ζ = 0.65：归位时保留一点点左右余震 —— 这就是"载体跟着晃"的那一下。
-            animationScope.launch { offsetAnimation.animateTo(0f, spring(0.65f, 350f, 0.5f)) }
+            // ⚡ ζ = 1（临界阻尼）：归位直接停住，不再来回余震。
+            // 用户口径「球放大之后要让它稳定运行，不要让它一直抖来抖去」——
+            // 以前这里 ζ=0.65 是欠阻尼，松手后载体要晃两三下，读起来就是"抖"。
+            animationScope.launch { offsetAnimation.animateTo(0f, spring(1f, 500f, 0.5f)) }
           },
           onDrag = { _, dragAmount ->
             updateValue(
@@ -172,7 +210,8 @@ fun LotusBottomBar(
             animationScope.launch {
               offsetAnimation.animateTo(
                 offsetAnimation.value + dragAmount.x,
-                spring(0.5f, 500f, 0.5f),
+                // ⚡ 同样改成临界阻尼：拖动过程中载体不再振荡。
+                spring(1f, 700f, 0.5f),
               )
             }
           },
@@ -192,6 +231,12 @@ fun LotusBottomBar(
     }
 
     val barShape = RoundedCornerShape(percent = 50)
+
+    // ★ 抄 NASclaw：栏体表面 = 画布色。
+    // NASclaw 那份是 `canvas.copy(alpha = 0.4f)`（它的深色画布上 40% 才够"有面"）。
+    // 我们是纯白画布，同样的 40% 叠上去读成一块不透明的灰板 ——
+    // 用户口径「底栏背景太不透明了 整体透一些」。这里压到 0.20。
+    val containerColor = LotusPalette.Canvas.copy(alpha = 0.10f)
 
     // ---- ① 外栏（可见）----
     Row(
@@ -213,16 +258,15 @@ fun LotusBottomBar(
           // 「菜单栏底部被选中的地方没有实时的模糊」。
           exportedBackdrop = barBackdrop,
           effects = {
+            // ★ 抄 NASclaw（ai.openclaw.app.ui.NasBottomBar，上游原版参数）：
+            //   vibrancy() + blur(8dp) + lens(24dp, 24dp)
+            // 用户口径：「找一个叫 NASclaw 的底栏，那个底栏做的就非常完美 你直接抄外观，抄得一模一样」。
             vibrancy()
-            // ⚠️ **和 `glassPanel` 走同一套常数，不许各写各的**（用户口径：「你把它改为全局液态
-            // 玻璃，和我们那个效果一样」）。外栏取 strength = 0.5：
-            //   blur = 16dp × 0.5 × LiquidBlurScale(0.32) ≈ 2.6dp   ← 只有一层雾
-            //   lens = 20dp × 0.5 × LiquidLensScale(1.5)  = 15dp      ← 玻璃感靠它，带色散
-            val strength = 0.5f
-            val blurPx = 16f.dp.toPx() * strength * LiquidBlurScale
-            val lensPx = 20f.dp.toPx() * strength * LiquidLensScale
-            blur(blurPx)
-            lens(lensPx * 0.62f, lensPx * 1.15f, chromaticAberration = true)
+            // NASclaw 那档是 blur(8dp) —— 它背后是深色/有图的画布，8dp 读作通透；
+            // 我们背后是纯白，8dp 就成了一块磨砂（用户口径「现在还像个磨砂玻璃」）。
+            // 所以只把**模糊**换回我们的低模糊配方（≈2.56dp），折射仍是 NASclaw 的 24dp。
+            blur(16f.dp.toPx() * 0.5f * LiquidBlurScale)
+            lens(24f.dp.toPx(), 24f.dp.toPx())
           },
           // 镜面高光：上游默认 0.5dp 宽。和 glassPanel 一样加宽到 1dp，白底上那刀白才立得住。
           highlight = { Highlight.Default.copy(width = 1.dp, alpha = 0.90f) },
@@ -234,34 +278,72 @@ fun LotusBottomBar(
             scaleX = scale
             scaleY = scale
           },
-          // 霜面：白底上 8% 白 = 什么都没有（加白到白还是白），所以这里也必须走霜面笔刷。
-          onDrawSurface = { drawRect(brush = glassVeilBrush()) },
+          // ★ 抄 NASclaw：表面色 = 画布色 40%（不是我们的渐变霜面）。
+          onDrawSurface = { drawRect(containerColor) },
         )
         .height(BarHeight)
         .fillMaxWidth()
-        .glassRim(shape = barShape, alpha = 0.85f)
+        // ⚡ spectrum = 0：② 是每帧都在录制的折射源，glassRim 默认还会画一圈
+        // `sweepGradient` 光谱描边 —— 那层在 ② 上既不参与观感（会被 lens 折掉），
+        // 又白烧一份渐变 + 描边。上下两边要的只是"有一条能被折进来的边"，
+        // 所以这里只留纯色描边。用户口径「这次怎么有点卡卡的感觉」。
+        .glassRim(shape = barShape, alpha = 0.85f, spectrum = 0f)
         .padding(4.dp),
       verticalAlignment = Alignment.CenterVertically,
     ) {
       LotusTabIcons(tabs = tabs, onSelect = onSelect)
     }
 
-    // ---- ② 折射源层（alpha 0，眼睛看不见，只录进 tabsBackdrop）----
+    // ---- ② 折射源层（alpha 0，只录进 tabsBackdrop）----
     //
-    // 四枚图标全录。泡盖到谁，折射出来的就是谁 —— "泡盖到谁谁亮"是光学结果，不是判定。
+    // ## 这一层是上游的正确写法（Kyant0/AndroidLiquidGlass@kmp · LiquidBottomTabs.kt）
     //
-    // 关于"残影"：上一轮把它归因成"四枚图标被放大的泡吸进邻居"，于是改成只录一枚 ——
-    // 方向错了。真因在 [ai.lotus.app.ui.glass.GlassBackground]：底色画在 layerBackdrop 外面
-    // ⇒ 源纹理全透明 ⇒ 玻璃不遮底 ⇒ 折射出的图标叠在原图标上。底修好之后这里必须
-    // **保持四枚**，否则泡放大时邻居不会被拉进来，"液态"的横向流动感就没了。
+    // ⚠️⚠️ **它不只是图标**：它是把"整条底栏的玻璃"再画一遍 —— `vibrancy() + blur(...)`
+    //     + 表面色，**图标画在这层玻璃之上**。于是录进 [tabsBackdrop] 的纹理是
+    //      "糊过的底 + 清晰的图标"。
+    //
+    // 由此，泡（③）折到的就是**已经糊好的底**，而图标是纹理里**本来就清晰**的像素 ——
+    // 这两件事**互不干扰**，所以：
+    //   · 泡里有模糊（用户口径：「背景是有模糊了」）—— 模糊来自这一层，不是来自泡；
+    //   · 图标永远清晰（用户口径：「把底栏的图标给覆盖掉了，像在一块玻璃后面」）—— 不糊它；
+    //   · 不需要在泡那一层加 blur（加了就糊图标，历史 bug）。
+    //
+    // ⚠️ `.alpha(0f)` 必须写在 `.layerBackdrop()` **之前**：图层照录完整内容，只是眼睛看不见。
+    // ⚠️ `ColorFilter.tint` 写在**最后**（链尾 = 最内层）：只染图标，不染那层玻璃 ——
+    //    上游就是这么写的（它染 accent 蓝，我们这版是单色，用 Ink）。
     Row(
       Modifier
         .clearAndSetSemantics {}
         .alpha(0f)
         .layerBackdrop(tabsBackdrop)
         .graphicsLayer { translationX = panelOffset }
+        .drawBackdrop(
+          backdrop = backdrop,
+          shape = { Capsule() },
+          effects = {
+            val progress = dampedDragAnimation.pressProgress
+            vibrancy()
+            // 折射源与栏体同一档低模糊（同上）。
+            blur(16f.dp.toPx() * 0.5f * LiquidBlurScale)
+            // 上游这里还有一发随按压长大的 lens：泡里那层玻璃自己也在"鼓"。
+            lens(24f.dp.toPx() * progress, 24f.dp.toPx() * progress)
+          },
+          highlight = { Highlight.Default.copy(alpha = dampedDragAnimation.pressProgress) },
+          shadow = { Shadow(alpha = 0f) },
+          innerShadow = { InnerShadow(radius = 0f.dp, alpha = 0f) },
+          onDrawSurface = { drawRect(containerColor) },
+        )
+        // 🔬 实验 E8：把上下两边做成和左右两边一样 —— **关键是把边线推进球里**。
+        //
+        // 静止时球高 50dp，按下放大到 ~72.5dp。② 的高度决定上下两条边线落在球内哪个位置：
+        //   · ② = 60dp（E1 试过的写法）⇒ 边线落在离球顶/球底 6.25dp（8.6%）处，
+        //     正好压在 lens 折射最强的那一圈里 ⇒ 被扯得看不出来；
+        //   · ② = 50dp（这里）⇒ 边线落在 11.25dp（15%）处，落在球内可读的位置。
+        // 所以 ② 用 InnerHeight、**并且带 rim**：上下各有一条边，和左右两端的圆角端
+        // 一样"有东西可折"。少录 10dp 也少一点每帧开销。
         .height(InnerHeight)
         .fillMaxWidth()
+        .glassRim(shape = barShape, alpha = 0.85f)
         .padding(horizontal = 4.dp)
         .graphicsLayer(colorFilter = ColorFilter.tint(LotusPalette.Ink)),
       verticalAlignment = Alignment.CenterVertically,
@@ -271,31 +353,23 @@ fun LotusBottomBar(
 
     // ---- ③ 玻璃泡 ----
     //
-    // ## 为什么是**两层**（2026-10-11 晚修：用户报「菜单栏底部被选中的地方没有实时的模糊」）
+    // ## 单层，照上游：`combined(页面, ②)` + **只 lens**
     //
-    // 原来只有一层，`backdrop = combined(页面背景, 图标层)`。问题有两半：
-    //  1. 采样**原始页面背景** ⇒ 泡里是没被外栏糊过的底，反而比周围更清楚，"看起来没模糊"；
-    //  2. 想给泡加 blur 又不敢 —— 采样源里有四枚图标，一糊图标就成一坨灰。
+    // 泡自己**不许加 blur / vibrancy / 霜面**：模糊已经在 ② 里做完了，这里再糊一次
+    // 就是"二次模糊"（用户否过的毛玻璃）。泡只干一件事 —— 把 ② 那张纹理折一下。
     //
-    // 正解是把两件事拆到两个**兄弟节点**里（顺序不能反）：
-    //  - **底层**：采样外栏导出的那层玻璃（[barBackdrop]，本来就是糊的），再补一遍轻 blur
-    //    ⇒ 泡里的背景比周围更软，"玻璃"一眼可辨；
-    //  - **顶层**：只采样图标层（[tabsBackdrop]，透明底）做 lens 折射 ⇒ 图标**永远清晰**，
-    //    只是被折了一下。顶层除图标外全透明，不会盖掉底层的模糊。
-    //
-    // ⚠️⚠️ 两层必须是**兄弟**，而且**各自**挂同一个 `layerBlock`。绝不能把顶层套在底层里面：
-    //     `layerBlock` 的 graphicsLayer 会作用到子节点，图层的 `-offset` 补偿只会抵消它**自己**那份
-    //     变换，于是图标被按着"泡的中心"整体放大位移 —— 这就是用户看到的
-    //     「加粗的图标乱跳 / 菜单栏下面凭空多出来一个文件夹图标」。
+    // 采样源是 `combined(页面, ②)` 而不是只有 ②：页面那半是**全屏**的，lens 往边缘外
+    // 采样时永远有像素可采 ⇒ 不会在泡的上下两面粘出"半截齿轮"那种边界残片。
+    // ⚠️ 别再改成"只采样 ②"或"只采样图标层" —— 那正是残片的来源（纹理比泡小）。
     val pillLayerBlock: GraphicsLayerScope.() -> Unit = {
       scaleX = dampedDragAnimation.scaleX
       scaleY = dampedDragAnimation.scaleY
-      // 拉丝对称：只压不拽，方向感交给泡的位移，避免"往哪拉都像往下掉"。
+      // 拉丝只走 **水平**：以前 velocity 还乘进 scaleY（`* 1f - pinch`），
+      // 拖动时速度每帧都在变 ⇒ 球的高度每帧被压一下、弹一下，读出来就是
+      // 「球一直在上下波动，不稳定」。垂直方向的形变交给 dampedDragAnimation 自己的 scaleY。
       val velocity = dampedDragAnimation.velocity / 10f
       val stretch = (abs(velocity) * 0.75f).fastCoerceIn(0f, 0.2f)
-      val pinch = (abs(velocity) * 0.25f).fastCoerceIn(0f, 0.2f)
       scaleX /= 1f - stretch
-      scaleY *= 1f - pinch
     }
     Box(
       Modifier
@@ -312,37 +386,15 @@ fun LotusBottomBar(
         .height(InnerHeight)
         .fillMaxWidth(1f / tabsCount)
     ) {
-      // ---- 底层：外栏那层玻璃 + 再糊一遍 ----
       Box(
         Modifier.fillMaxSize().drawBackdrop(
-          backdrop = barBackdrop,
-          shape = { Capsule() },
-          effects = {
-            // 和外栏同一套常数（16dp × 0.5 × LiquidBlurScale）⇒ 泡里的底**比外栏更软一点**，
-            // 但亮度不变（不加 vibrancy、不加霜面，免得又成一块白板）。
-            blur(16f.dp.toPx() * 0.5f * LiquidBlurScale)
-          },
-          highlight = { Highlight.Default.copy(alpha = 0f) },
-          shadow = { Shadow(alpha = 0f) },
-          // 恒 0：内投影画在玻璃内部，会变成中央一块灰。
-          innerShadow = { InnerShadow(radius = 0f.dp, alpha = 0f) },
-          layerBlock = pillLayerBlock,
-          onDrawSurface = {
-            // 静止那层墨色**必须保留**：玻璃泡"有实体"全靠它。
-            val progress = dampedDragAnimation.pressProgress
-            drawRect(LotusPalette.Ink.copy(alpha = 0.06f), alpha = 1f - progress)
-            drawRect(LotusPalette.Ink.copy(alpha = 0.03f * progress))
-          },
-        )
-      )
-
-      // ---- 顶层：只画图标，做折射（图标保持清晰）----
-      Box(
-        Modifier.fillMaxSize().drawBackdrop(
-          backdrop = tabsBackdrop,
+          backdrop = rememberCombinedBackdrop(backdrop, tabsBackdrop),
           shape = { Capsule() },
           effects = {
             val progress = dampedDragAnimation.pressProgress
+            // 静止带基线折射（4dp/6dp），按下加深到 14dp/20dp —— 上限定在这里：
+            // 再大就会把图标自己压进泡上下两面的折射带里（= 残影）。
+            // ★ 抄 NASclaw：泡只有**按下的**折射（10dp·p / 14dp·p），静止时不是玻璃板。
             lens(
               10f.dp.toPx() * progress,
               14f.dp.toPx() * progress,
@@ -355,7 +407,14 @@ fun LotusBottomBar(
           shadow = { Shadow(alpha = 0f) },
           innerShadow = { InnerShadow(radius = 0f.dp, alpha = 0f) },
           layerBlock = pillLayerBlock,
-          onDrawSurface = {},
+          onDrawSurface = {
+            val progress = dampedDragAnimation.pressProgress
+            // 🔬 实验 E5：静止墨 0.06 → 0.025。
+            // 原因（源码层）：泡内 = ②（糊过的页面 + 霜面）+ ③ 这层墨。① 外栏只有霜面，
+            // ③ 却多压一层 6% 墨 ⇒ 泡永远比周围底栏暗一档，读出来就是「不透 / 一块实心板」。
+            // 把这一层压到几乎为零，泡就和底栏同亮度，「透」才成立。
+            drawRect(LotusPalette.Ink.copy(alpha = 0.025f), alpha = 1f - progress)
+          },
         )
       )
     }
@@ -412,10 +471,12 @@ enum class LotusTab(val key: String, val label: String, val glyph: LotusGlyph) {
 }
 
 /** 胶囊外栏高度。用户两次要求"做大一点"，从 52 提到 60。 */
-internal val BarHeight = 60.dp
+internal val BarHeight = 64.dp
 
 /** 内层（tab 内容层与玻璃泡）高度 = 外栏 - 上下各 5dp。 */
-internal val InnerHeight = 50.dp
+internal val InnerHeight = 56.dp
+
+
 
 /** 底栏离安全区底边的距离。定稿图（ui-glass-13）里这条留白 ≈ 屏高 13%，用户两次要求"往上移"。 */
 internal val BarMargin = 96.dp
