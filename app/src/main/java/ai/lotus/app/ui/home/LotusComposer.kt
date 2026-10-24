@@ -9,6 +9,8 @@ import ai.lotus.app.ui.glass.glassPanel
 import ai.lotus.app.ui.icons.LotusGlyph
 import ai.lotus.app.ui.icons.LotusIcon
 import ai.lotus.app.ui.theme.LotusPalette
+import ai.lotus.app.ui.motion.LotusSpringPreset
+import ai.lotus.app.ui.motion.lotusSpring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -156,7 +158,7 @@ fun LotusComposer(
   val growAnim by
     animateFloatAsState(
       targetValue = grow,
-      animationSpec = spring(dampingRatio = 0.72f, stiffness = 420f),
+      animationSpec = lotusSpring(LotusSpringPreset.Snappy),
       label = "composerGrow",
     )
   // 拉伸：**只在长高的那一瞬**踢一下，然后弹回去。
@@ -177,13 +179,13 @@ fun LotusComposer(
   val stretch by
     animateFloatAsState(
       targetValue = kick,
-      animationSpec = spring(dampingRatio = 0.3f, stiffness = 320f),
+      animationSpec = lotusSpring(LotusSpringPreset.Bouncy),
       label = "composerStretch",
     )
   val radius by
     animateDpAsState(
       targetValue = if (growAnim < 0.1f) LotusComposerHeight / 2 else 24.dp,
-      animationSpec = spring(dampingRatio = 0.7f, stiffness = 420f),
+      animationSpec = lotusSpring(LotusSpringPreset.Snappy),
       label = "composerRadius",
     )
   val shape = RoundedCornerShape(radius)
@@ -218,7 +220,7 @@ fun LotusComposer(
           1 -> 0.4f
           else -> 1.5f
         },
-      animationSpec = spring(dampingRatio = 0.55f, stiffness = 500f),
+      animationSpec = lotusSpring(LotusSpringPreset.Snappy),
       label = "composerTug",
     )
 
@@ -439,7 +441,7 @@ private fun Modifier.merge(index: Int, pressedSlot: Int?): Modifier {
   val k by
     animateFloatAsState(
       targetValue = if (adjacent) 1f else 0f,
-      animationSpec = spring(dampingRatio = 0.6f, stiffness = 600f),
+      animationSpec = lotusSpring(LotusSpringPreset.Snappy),
       label = "composerMerge",
     )
   return this.graphicsLayer {

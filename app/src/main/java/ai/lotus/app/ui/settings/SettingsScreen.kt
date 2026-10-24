@@ -24,14 +24,21 @@ import ai.lotus.app.data.UpdateChecker
 import ai.lotus.app.data.Probe
 import ai.lotus.app.data.DefaultContextWindow
 import ai.lotus.app.data.ProviderConfig
+import ai.lotus.app.ui.computer.LotusComputerScreen
 import ai.lotus.app.ui.glass.glassPanel
 import ai.lotus.app.ui.glass.pressLiquid
 import ai.lotus.app.ui.icons.LotusGlyph
 import ai.lotus.app.ui.home.GlassConfirmDialog
 import ai.lotus.app.ui.home.GlassPromptDialog
+import ai.lotus.app.shizuku.RootPhase
+import ai.lotus.app.shizuku.RootState
+import ai.lotus.app.shizuku.ShizukuPhase
+import ai.lotus.app.shizuku.ShizukuState
 import ai.lotus.app.ui.icons.LotusIcon
 import ai.lotus.app.ui.model.thinkingFor
 import ai.lotus.app.ui.theme.LotusPalette
+import ai.lotus.app.ui.motion.LotusSpringPreset
+import ai.lotus.app.ui.motion.lotusSpring
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -121,6 +128,8 @@ private enum class SettingsPage(val title: String) {
   Conversation("对话设置"),
   Data("会话与数据"),
   Archived("已归档"),
+  SystemTools("系统工具"),
+  Computer("Lotus的电脑"),
   About("关于"),
 
   /** 用户口径：「放在其他那里关于的下面那一位单独做一个：每发一个版本，都有日志，
@@ -182,6 +191,12 @@ fun SettingsScreen(
   onCheckUpdate: () -> Unit = {},
   /** 备份导入成功后，让 LotusApp 把内存里的模型 / 会话 / MD 状态全部重载。 */
   onBackupImported: () -> Unit = {},
+  /** 应用自己的 su Root 后端。 */
+  rootState: RootState = RootState(),
+  onConnectRoot: () -> Unit = {},
+  /** Shizuku 兼容后端。页面只读取；授权只能由用户点按钮触发。 */
+  shizukuState: ShizukuState = ShizukuState(),
+  onConnectShizuku: () -> Unit = {},
   bottomInset: Dp,
 ) {
   var page by remember { mutableStateOf(SettingsPage.Index) }
@@ -206,11 +221,15 @@ fun SettingsScreen(
       if (uri != null && AvatarStore.save(avatarContext, uri)) onUserAvatarChange()
     }
   var editingCap by remember { mutableStateOf<CapabilityKind?>(null) }
+  val selectedModelLabel =
+    providers.firstOrNull { it.id == selectedProviderId }?.displayName(selectedModelId)
+      ?: selectedModelId
   val parentOf: (SettingsPage) -> SettingsPage = { p ->
     when (p) {
       SettingsPage.ProviderEdit -> SettingsPage.Providers
       SettingsPage.CapabilityEdit -> SettingsPage.DefaultModel
       SettingsPage.Changelog -> SettingsPage.About
+      SettingsPage.Computer -> SettingsPage.Index
       else -> SettingsPage.Index
     }
   }
@@ -240,12 +259,15 @@ fun SettingsScreen(
         bottomInset = bottomInset,
         providers = providers,
         selectedModelId = selectedModelId,
+        selectedModelLabel = selectedModelLabel,
         thinkingIndex = thinkingIndex,
         assistantName = assistantName,
         messageCount = messageCount,
         conversationCount = conversationCount,
         archivedConversations = archivedConversations,
         memoryFiles = memoryFiles,
+        rootState = rootState,
+        shizukuState = shizukuState,
         onOpen = { page = it },
       )
     SettingsPage.Providers ->
@@ -356,6 +378,16 @@ fun SettingsScreen(
         onPurgeAll = onPurgeArchived,
         onBack = back,
       )
+    SettingsPage.SystemTools ->
+      SystemToolsPane(
+        rootState = rootState,
+        shizukuState = shizukuState,
+        bottomInset = bottomInset,
+        onConnectRoot = onConnectRoot,
+        onConnectShizuku = onConnectShizuku,
+        onBack = back,
+      )
+    SettingsPage.Computer -> LotusComputerScreen(bottomInset = bottomInset, onBack = back)
     SettingsPage.About ->
       AboutPane(
         bottomInset = bottomInset,
@@ -405,12 +437,15 @@ private fun SettingsIndex(
   bottomInset: Dp,
   providers: List<ProviderConfig>,
   selectedModelId: String,
+  selectedModelLabel: String,
   thinkingIndex: Int,
   assistantName: String,
   messageCount: Int,
   conversationCount: Int,
   archivedConversations: List<Conversation>,
   memoryFiles: Int,
+  rootState: RootState,
+  shizukuState: ShizukuState,
   onOpen: (SettingsPage) -> Unit,
 ) {
   val settingsContext = LocalContext.current
@@ -448,7 +483,7 @@ private fun SettingsIndex(
       Hairline()
       SettingsRow(
         "默认模型",
-        if (selectedModelId.isBlank()) "未选" else selectedModelId,
+        if (selectedModelLabel.isBlank()) "未选" else selectedModelLabel,
         // ⚠️ 用户口径：「设置那里默认模型和对话设置的图标重复了，改一个」——
         //    这一行原来和「对话设置」同用 Tune（滑杆），换成 Cube（一个方块 = 一个模型）。
         icon = LotusGlyph.Cube,
@@ -515,6 +550,21 @@ private fun SettingsIndex(
 
     Caption("其他")
     SettingsGroup(enter = 3) {
+      SettingsRow(
+        "系统工具",
+        if (rootState.ready) "Root · 已连接"
+        else "Shizuku · ${shizukuServiceLabel(shizukuState)}",
+        icon = LotusGlyph.Settings,
+        onClick = { onOpen(SettingsPage.SystemTools) },
+      )
+      Hairline()
+      SettingsRow(
+        "Lotus的电脑",
+        "本机 Agent · 127.0.0.1:38473",
+        icon = LotusGlyph.Computer,
+        onClick = { onOpen(SettingsPage.Computer) },
+      )
+      Hairline()
       SettingsRow(
         "关于",
         "v$AppVersion",
@@ -594,7 +644,7 @@ private fun ProviderRow(provider: ProviderConfig, selected: Boolean, onClick: ()
   val press by
     animateFloatAsState(
       targetValue = if (pressed) 1f else 0f,
-      animationSpec = spring(dampingRatio = 0.55f, stiffness = 700f),
+      animationSpec = lotusSpring(LotusSpringPreset.Snappy),
       label = "providerRowDim",
     )
   // 状态点：拿到过模型 = 实心（可以用了）；没拿到 = 空心的（还没配好/没测）。
@@ -653,7 +703,7 @@ private fun AddPillButton(text: String, modifier: Modifier = Modifier, onClick: 
   val scale by
     animateFloatAsState(
       targetValue = if (pressed) 1.03f else 1f,
-      animationSpec = spring(dampingRatio = 0.42f, stiffness = 900f),
+      animationSpec = lotusSpring(LotusSpringPreset.Snappy),
       label = "pillScale",
     )
   Row(
@@ -690,7 +740,7 @@ internal fun MiniPill(text: String, enabled: Boolean = true, onClick: () -> Unit
   val press by
     animateFloatAsState(
       targetValue = if (pressed) 1f else 0f,
-      animationSpec = spring(dampingRatio = 0.55f, stiffness = 700f),
+      animationSpec = lotusSpring(LotusSpringPreset.Snappy),
       label = "miniPillPress",
     )
   Box(
@@ -740,6 +790,8 @@ private fun ProviderEditPane(
     mutableStateOf((existing?.contextWindow ?: DefaultContextWindow).toString())
   }
   var models by remember { mutableStateOf(existing?.models.orEmpty()) }
+  var modelDisplayNames by remember { mutableStateOf(existing?.modelDisplayNames.orEmpty()) }
+  var renamingModelId by remember { mutableStateOf<String?>(null) }
   var addingModel by remember { mutableStateOf(false) }
   var newModelId by remember { mutableStateOf("") }
 
@@ -749,13 +801,18 @@ private fun ProviderEditPane(
   var ok by remember { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
 
-  fun snapshot(err: String? = null, nextModels: List<String> = models) =
+  fun snapshot(
+    err: String? = null,
+    nextModels: List<String> = models,
+    nextDisplayNames: Map<String, String> = modelDisplayNames,
+  ) =
     ProviderConfig(
       id = draftId,
       name = name,
       baseUrl = baseUrl,
       apiKey = apiKey,
       models = nextModels,
+      modelDisplayNames = nextDisplayNames.filterKeys { it in nextModels },
       contextWindow = contextWindow.trim().toIntOrNull()?.takeIf { it > 0 } ?: DefaultContextWindow,
       lastError = err,
       lastTestedAt = if (err == null && nextModels.isNotEmpty()) System.currentTimeMillis()
@@ -774,6 +831,7 @@ private fun ProviderEditPane(
           ok = true
           result = "通了 · 拿到 ${r.models.size} 个模型"
           models = r.models
+          modelDisplayNames = modelDisplayNames.filterKeys { it in r.models }
           onSave(snapshot(err = null, nextModels = r.models))
         }
         is Probe.Err -> {
@@ -877,8 +935,10 @@ private fun ProviderEditPane(
           if (index > 0) Hairline()
           ModelRow(
             id = id,
+            displayName = modelDisplayNames[id]?.takeIf { it.isNotBlank() } ?: id,
             selected = selectedProviderId == draftId && selectedModelId == id,
             onClick = { onSelectModel(draftId, id) },
+            onRename = { renamingModelId = id },
             onRemove = {
               models = models - id
               onSave(snapshot(nextModels = models))
@@ -900,6 +960,24 @@ private fun ProviderEditPane(
       }
     }
   }
+
+  renamingModelId?.let { modelId ->
+    GlassPromptDialog(
+      title = "模型显示名称",
+      initial = modelDisplayNames[modelId] ?: modelId,
+      confirmLabel = "保存",
+      hint = "只改界面显示，真实模型 id 仍是 $modelId",
+      onConfirm = { raw ->
+        val label = raw.trim()
+        modelDisplayNames =
+          if (label.isBlank() || label == modelId) modelDisplayNames - modelId
+          else modelDisplayNames + (modelId to label)
+        onSave(snapshot())
+        renamingModelId = null
+      },
+      onDismiss = { renamingModelId = null },
+    )
+  }
 }
 
 /** 把 Base URL 补成真正会请求的地址，给用户看一眼。 */
@@ -912,8 +990,10 @@ private fun endpointPreview(baseUrl: String): String {
 @Composable
 private fun ModelRow(
   id: String,
+  displayName: String = id,
   selected: Boolean,
   onClick: () -> Unit,
+  onRename: (() -> Unit)? = null,
   onRemove: () -> Unit,
 ) {
   val interaction = remember { MutableInteractionSource() }
@@ -921,7 +1001,7 @@ private fun ModelRow(
   val press by
     animateFloatAsState(
       targetValue = if (pressed) 1f else 0f,
-      animationSpec = spring(dampingRatio = 0.55f, stiffness = 700f),
+      animationSpec = lotusSpring(LotusSpringPreset.Snappy),
       label = "modelRowDim",
     )
   Row(
@@ -932,14 +1012,28 @@ private fun ModelRow(
         .padding(start = 18.dp, end = 10.dp, top = 10.dp, bottom = 10.dp),
     verticalAlignment = Alignment.CenterVertically,
   ) {
-    Text(
-      text = id,
-      style = MaterialTheme.typography.bodyLarge,
-      color = LotusPalette.Ink,
-      maxLines = 1,
-      overflow = TextOverflow.Ellipsis,
-      modifier = Modifier.weight(1f),
-    )
+    Column(modifier = Modifier.weight(1f)) {
+      Text(
+        text = displayName,
+        style = MaterialTheme.typography.bodyLarge,
+        color = LotusPalette.Ink,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+      if (displayName != id) {
+        Text(
+          text = id,
+          style = MaterialTheme.typography.bodySmall,
+          color = LotusPalette.InkFaint,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+        )
+      }
+    }
+    onRename?.let { rename ->
+      MiniPill(text = "改名") { rename() }
+      Spacer(Modifier.width(6.dp))
+    }
     if (selected) {
       Text(
         text = "当前",
@@ -954,7 +1048,7 @@ private fun ModelRow(
     val removePress by
       animateFloatAsState(
         targetValue = if (removePressed) 1f else 0f,
-        animationSpec = spring(dampingRatio = 0.55f, stiffness = 700f),
+        animationSpec = lotusSpring(LotusSpringPreset.Snappy),
         label = "removePress",
       )
     Box(
@@ -1682,6 +1776,112 @@ private fun ChangelogPane(bottomInset: Dp, onBack: () -> Unit) {
   }
 }
 
+// ---------------------------------------------------------------- 系统工具
+
+private fun shizukuServiceLabel(state: ShizukuState): String =
+  when (state.phase) {
+    ShizukuPhase.Ready -> "已连接"
+    ShizukuPhase.PermissionRequired -> "待授权"
+    ShizukuPhase.Connecting -> "连接中"
+    ShizukuPhase.Error -> "异常"
+    ShizukuPhase.Unavailable -> "未连接"
+  }
+
+private fun rootServiceLabel(state: RootState): String =
+  when (state.phase) {
+    RootPhase.Ready -> "已连接"
+    RootPhase.Requesting -> "请求中"
+    RootPhase.Denied -> "未授权"
+    RootPhase.Error -> "异常"
+    RootPhase.NotRequested -> "未连接"
+  }
+
+@Composable
+private fun SystemToolsPane(
+  rootState: RootState,
+  shizukuState: ShizukuState,
+  bottomInset: Dp,
+  onConnectRoot: () -> Unit,
+  onConnectShizuku: () -> Unit,
+  onBack: () -> Unit,
+) {
+  val rootLabel = rootServiceLabel(rootState)
+  val rootIdentity =
+    when (rootState.phase) {
+      RootPhase.Ready -> "root · ${rootState.selinux.ifBlank { "已授权" }}"
+      RootPhase.Requesting -> "等待 su 授权"
+      RootPhase.Denied -> "su 被拒绝"
+      RootPhase.Error -> "su 异常"
+      RootPhase.NotRequested -> "未请求"
+    }
+  val shizukuLabel = shizukuServiceLabel(shizukuState)
+  val shizukuIdentity =
+    when (shizukuState.phase) {
+      ShizukuPhase.Ready -> shizukuState.identity.ifBlank { "未知" }
+      ShizukuPhase.PermissionRequired -> "未授权"
+      ShizukuPhase.Connecting -> "准备中"
+      ShizukuPhase.Error, ShizukuPhase.Unavailable -> "未知"
+    }
+
+  SettingsScaffold(SettingsPage.SystemTools.title, bottomInset, onBack) {
+    Text(
+      "Root 直连 su；Shizuku 作为兼容后端。Root 可用时优先使用 Root。",
+      style = MaterialTheme.typography.bodyMedium,
+      color = LotusPalette.InkMuted,
+      modifier = Modifier.padding(horizontal = 6.dp, vertical = 8.dp),
+    )
+    Spacer(Modifier.height(4.dp))
+    SettingsGroup(enter = 0) {
+      SettingsRow("Root 权限", rootLabel, chevron = false, onClick = {})
+      Hairline()
+      SettingsRow("Root 身份", rootIdentity, chevron = false, onClick = {})
+      Hairline()
+      SettingsRow("Shizuku 服务", shizukuLabel, chevron = false, onClick = {})
+      Hairline()
+      SettingsRow("Shizuku 身份", shizukuIdentity, chevron = false, onClick = {})
+    }
+    if (rootState.phase == RootPhase.Denied || rootState.phase == RootPhase.Error) {
+      Spacer(Modifier.height(10.dp))
+      Text(
+        rootState.message,
+        style = MaterialTheme.typography.bodySmall,
+        color = LotusPalette.InkFaint,
+        lineHeight = 18.sp,
+        modifier = Modifier.padding(horizontal = 6.dp),
+      )
+    }
+    Spacer(Modifier.height(14.dp))
+    Text(
+      "系统工具只开放固定白名单；每轮最多调用一次。冻结/解冻仅允许非关键系统应用，关键应用会被客户端直接拒绝。",
+      style = MaterialTheme.typography.bodySmall,
+      color = LotusPalette.InkFaint,
+      lineHeight = 18.sp,
+      modifier = Modifier.padding(horizontal = 6.dp),
+    )
+    Spacer(Modifier.height(18.dp))
+    SettingsGroup(enter = 1) {
+      SettingsRow(
+        when (rootState.phase) {
+          RootPhase.Ready -> "重新验证 Root"
+          RootPhase.Requesting -> "正在请求 Root"
+          else -> "获取 Root 权限"
+        },
+        null,
+        chevron = false,
+        strong = true,
+        onClick = onConnectRoot,
+      )
+      Hairline()
+      SettingsRow(
+        if (shizukuState.phase == ShizukuPhase.Ready) "重新连接 Shizuku" else "授权并连接 Shizuku",
+        null,
+        chevron = false,
+        onClick = onConnectShizuku,
+      )
+    }
+  }
+}
+
 @Composable
 private fun AboutPane(
   bottomInset: Dp,
@@ -1806,7 +2006,7 @@ internal fun SettingsScaffold(
       val backScale by
         animateFloatAsState(
           targetValue = if (backPressed) 1.10f else 1f,
-          animationSpec = spring(dampingRatio = 0.40f, stiffness = 1100f),
+          animationSpec = lotusSpring(LotusSpringPreset.Snappy),
           label = "backScale",
         )
       Box(
@@ -1862,7 +2062,7 @@ internal fun SettingsGroup(
   val enterShift by
     animateFloatAsState(
       targetValue = if (appeared.value) 0f else 1f,
-      animationSpec = spring(dampingRatio = 0.72f, stiffness = 380f),
+      animationSpec = lotusSpring(LotusSpringPreset.Snappy),
       label = "groupShift",
     )
   Column(
@@ -1926,7 +2126,7 @@ internal fun SettingsRow(
   val press by
     animateFloatAsState(
       targetValue = if (pressed) 1f else 0f,
-      animationSpec = spring(dampingRatio = 0.55f, stiffness = 700f),
+      animationSpec = lotusSpring(LotusSpringPreset.Snappy),
       label = "rowDim",
     )
   Row(

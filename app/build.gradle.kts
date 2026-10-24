@@ -1,8 +1,29 @@
+import java.util.Properties
+
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
   alias(libs.plugins.kotlin.serialization)
 }
+
+// 正式签名放在用户目录之外，凭据不进入仓库。环境变量可覆盖路径，便于 CI 或换机。
+val lotusSigningPropertiesFile =
+  file(
+    System.getenv("LOTUS_KEYSTORE_PROPERTIES")
+      ?: "${System.getProperty("user.home")}/.lotusai/signing/keystore.properties"
+  )
+val lotusSigningProperties =
+  Properties().apply {
+    if (lotusSigningPropertiesFile.isFile) {
+      lotusSigningPropertiesFile.inputStream().use(::load)
+    }
+  }
+val hasLotusSigning =
+  lotusSigningPropertiesFile.isFile &&
+    !lotusSigningProperties.getProperty("storeFile").isNullOrBlank() &&
+    !lotusSigningProperties.getProperty("storePassword").isNullOrBlank() &&
+    !lotusSigningProperties.getProperty("keyAlias").isNullOrBlank() &&
+    !lotusSigningProperties.getProperty("keyPassword").isNullOrBlank()
 
 android {
   namespace = "ai.lotus.app"
@@ -18,8 +39,19 @@ android {
     applicationId = "ai.lotus.app"
     minSdk = 28
     targetSdk = 35
-    versionCode = 2026101902
-    versionName = "2026.10.19.2"
+    versionCode = 2026102401
+    versionName = "2026.10.24.1"
+  }
+
+  signingConfigs {
+    if (hasLotusSigning) {
+      create("lotus") {
+        storeFile = file(lotusSigningProperties.getProperty("storeFile"))
+        storePassword = lotusSigningProperties.getProperty("storePassword")
+        keyAlias = lotusSigningProperties.getProperty("keyAlias")
+        keyPassword = lotusSigningProperties.getProperty("keyPassword")
+      }
+    }
   }
 
   buildTypes {
@@ -27,16 +59,19 @@ android {
       isMinifyEnabled = true
       isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+      if (hasLotusSigning) signingConfig = signingConfigs.getByName("lotus")
     }
     debug {
       versionNameSuffix = "-debug"
       isMinifyEnabled = false
+      if (hasLotusSigning) signingConfig = signingConfigs.getByName("lotus")
     }
   }
 
   buildFeatures {
     compose = true
     buildConfig = true
+    aidl = true
   }
 
   compileOptions {
@@ -90,4 +125,9 @@ dependencies {
   implementation(libs.haze.core)
   implementation(libs.haze.blur)
   implementation(libs.haze.blur.materials)
+
+  // ===== 系统工具桥 =====
+  // Shizuku 只负责把 Binder 以 shell/root 身份转发；真正的工具白名单在 UserService 内。
+  implementation(libs.shizuku.api)
+  implementation(libs.shizuku.provider)
 }

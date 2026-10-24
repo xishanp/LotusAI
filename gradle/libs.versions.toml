@@ -19,6 +19,8 @@ haze = "2.0.1"
 # 模糊 / vibrancy / 高光 / 阴影都做齐。形状与圆角用同作者的 shapes。
 backdrop = "2.0.1"
 kyant-shapes = "1.2.1"
+# 系统级工具桥：Shizuku（ADB/root 身份 Binder 代理）。
+shizuku = "13.1.5"
 
 [libraries]
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "androidx-core" }
@@ -42,6 +44,8 @@ haze-blur = { module = "dev.chrisbanes.haze:haze-blur", version.ref = "haze" }
 haze-blur-materials = { module = "dev.chrisbanes.haze:haze-blur-materials", version.ref = "haze" }
 backdrop = { module = "io.github.kyant0:backdrop", version.ref = "backdrop" }
 kyant-shapes = { module = "io.github.kyant0:shapes", version.ref = "kyant-shapes" }
+shizuku-api = { module = "dev.rikka.shizuku:api", version.ref = "shizuku" }
+shizuku-provider = { module = "dev.rikka.shizuku:provider", version.ref = "shizuku" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

@@ -2,8 +2,11 @@ package ai.lotus.app
 
 import ai.lotus.app.ui.LotusApp
 import ai.lotus.app.ui.LotusSplash
+import ai.lotus.app.computer.LinuxHubBridge
 import ai.lotus.app.data.AppPrefs
 import ai.lotus.app.data.Prompts
+import ai.lotus.app.shizuku.RootBridge
+import ai.lotus.app.shizuku.ShizukuBridge
 import ai.lotus.app.ui.onboarding.LotusOnboarding
 import ai.lotus.app.ui.theme.LotusTheme
 import android.os.Bundle
@@ -22,7 +25,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Rect
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * 启动页停留时长。
@@ -36,6 +42,23 @@ private const val SplashHoldMillis = 660L
 private const val SplashFadeMillis = 220
 
 class MainActivity : ComponentActivity() {
+  private var linuxHubProbeJob: Job? = null
+
+  override fun onResume() {
+    super.onResume()
+    // LinuxHub 可能比 Lotus 晚启动，或由用户在应用外重新开启。每次回到前台重新握手一次，
+    // 只有 health 和 tools 都成功才会把电脑工具暴露给模型。
+    linuxHubProbeJob?.cancel()
+    if (!LinuxHubBridge.tokenConfigured(this)) {
+      LinuxHubBridge.invalidate()
+    } else {
+      linuxHubProbeJob =
+        lifecycleScope.launch {
+          LinuxHubBridge.status(this@MainActivity)
+        }
+    }
+  }
+
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     enableEdgeToEdge()
@@ -44,6 +67,10 @@ class MainActivity : ComponentActivity() {
     // 保证 UI 第一帧读到的就是铺好的内容。
     Prompts.ensureDefaults(this)
     Prompts.reclassifyAutoMemory(this)
+    // Shizuku 的 Binder 只能绑定到有前台 Activity 的进程；授权完成后会自动拉起
+    // 独立 UserService。没有 Shizuku 时这里只会显示“未连接”，不影响正常聊天。
+    RootBridge.attach(this)
+    ShizukuBridge.attach(this)
     setContent {
       LotusTheme {
         var showSplash by remember { mutableStateOf(true) }
@@ -85,5 +112,10 @@ class MainActivity : ComponentActivity() {
         }
       }
     }
+  }
+
+  override fun onDestroy() {
+    ShizukuBridge.detach(this)
+    super.onDestroy()
   }
 }

@@ -1,5 +1,41 @@
 # 更新日志 / Changelog
 
+## v2026.10.24.1 — 本机工具与系统能力大版本
+
+- 新增 LinuxHub 本机 Agent 桥接：通过 `127.0.0.1:38473` 连接外部 Ubuntu 工作区，Token 只保存在本机；应用回到前台会自动重新握手，旧 Token 的请求不能覆盖新状态。
+- 接入 11 个电脑工具：容器终端、无头桌面启动/状态/停止、X11 截图、鼠标、键盘、UTF-8 文字输入、图形应用启动、Shizuku 状态和系统信息；工具目录由 LinuxHub 实时返回。
+- 设置新增“Lotus的电脑”：可粘贴、显示、保存、清空 Token，检测真实连接，查看可用能力并在本机容器执行命令；响应超时、401、异常和超长内容都会如实显示。
+- 新增独立 Root 与 Shizuku 后端：Root 优先、Shizuku 兜底；Shizuku 使用独立 UserService 进程，授权只由用户主动触发，不在冷启动时弹窗。
+- 新增系统工具白名单：读取设备身份、应用列表、前台应用和系统设置；可冻结或解冻非关键系统应用，关键应用与非法包名由客户端直接拒绝，不开放任意 shell。
+- 聊天正式支持函数工具调用：流式拼接 `tool_calls` 参数，执行一次后把结构化结果回填给模型，再生成最终回答；模型看不到真实后端时不会假装已经执行。
+- 聊天新增真实工具日志：回答过程中实时显示思考、工具名称、后端、耗时和结果明细；完成后可在“工具记录”中复查，成功和失败分别标为“已完成”“未完成”。
+- 修复联网与 Shizuku 工具互斥：开启联网搜索后不再静默删除本机工具；中转站不接受混合 `tools` 时，优先保留 Shizuku/电脑工具，再按需退回纯联网或纯聊天。
+- 流式协议增强：支持工具调用分段、更多 reasoning 字段结构、`finish_reason` 截断与内容过滤提示；经过工具调用的回答会累计两轮真实 token 用量，失败提示不再覆盖已经生成的内容。
+- 模型显示名与上游模型 ID 分离：界面可以给模型起自己的名字，同时保留真实 ID 发送请求，不会因为改名把模型调坏。
+- 工具页与系统工具页新增 Root/Shizuku 实时状态、身份、连接按钮和真实配置提示；未连接的能力不会显示为可用。
+- 统一全应用交互动效：输入框、菜单、设置、工具面板和弹窗改用同一套 smooth / snappy / bouncy 弹簧参数，按下、回弹和相邻按钮联动的手感保持一致。
+- 发布构建补强：正式签名从仓库外读取；R8 保留 Shizuku UserService；明文 HTTP 只允许 `127.0.0.1` / `localhost`，其他网络仍禁止明文。
+
+---
+
+## v2026.10.24.1 — Local tools and system capabilities
+
+- Added the LinuxHub local-agent bridge over `127.0.0.1:38473`, connecting to the external Ubuntu workspace. The token stays on-device, the bridge re-handshakes whenever the app returns to the foreground, and a stale token request can no longer overwrite the current state.
+- Integrated 11 computer tools: container terminal, headless desktop start/status/stop, X11 screenshots, mouse, keyboard, UTF-8 text input, graphical app launch, Shizuku status, and system information. The tool catalog is discovered live from LinuxHub.
+- Added a “Lotus Computer” settings page for pasting, revealing, saving, and clearing the token, verifying the real connection, inspecting available capabilities, and running container commands. Timeouts, 401 responses, malformed payloads, and oversized responses are surfaced honestly.
+- Added separate Root and Shizuku backends: Root is preferred and Shizuku is the fallback. Shizuku runs in a dedicated UserService process, and authorization is only requested by an explicit user action, never during cold start.
+- Added a system-tool allowlist for reading device identity, installed apps, the foreground app, and system settings. Non-critical system apps can be frozen or unfrozen; critical packages and invalid package names are rejected by the client, and arbitrary shell access is not exposed.
+- Added functional tool calling to chat: streamed `tool_calls` fragments are assembled, executed once, and fed back to the model as structured results before the final answer. The model cannot claim an action succeeded when no real backend was available.
+- Added real tool activity logs in chat: reasoning, tool name, backend, duration, and result details are shown while the answer is running and remain available under “Tool records” afterward. Successful and failed calls are prefixed with “Completed” and “Not completed” respectively.
+- Fixed the conflict between web search and Shizuku tools: enabling web search no longer silently removes local tools. When an upstream gateway rejects mixed `tools`, the client preserves Shizuku/computer tools first, then falls back to web-only or plain chat as needed.
+- Strengthened streaming protocol handling with fragment assembly for tool calls, broader reasoning field support, `finish_reason` truncation/content-filter messages, and accumulated real token usage across tool round-trips. Failure messages no longer overwrite content that was already generated.
+- Separated model display names from upstream model IDs: the UI can assign a friendly name while the real ID is still used for requests.
+- Added live Root/Shizuku status, identity, connection actions, and honest configuration hints to the tools and system-tools pages. Unavailable capabilities are never presented as ready.
+- Unified interaction motion across the composer, menus, settings, tool panels, and dialogs with one smooth / snappy / bouncy spring system. Press, release, and linked-button feedback now feel consistent throughout the app.
+- Hardened release builds: signing credentials are loaded outside the repository, R8 preserves the Shizuku UserService, and cleartext HTTP is restricted to `127.0.0.1` / `localhost` while remaining disabled elsewhere.
+
+---
+
 ## v2026.10.19.2 — 图片多选修复
 
 - 图片选择器改为多选，单条消息最多可附加 9 张图片。

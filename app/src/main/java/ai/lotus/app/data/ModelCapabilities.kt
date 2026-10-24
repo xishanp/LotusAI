@@ -147,6 +147,7 @@ private suspend fun probe(
         is ChatEvent.Failed -> failure = event.message
         ChatEvent.Done -> done = true
         is ChatEvent.Usage -> Unit
+        is ChatEvent.ToolCalls -> Unit
       }
     }
 

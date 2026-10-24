@@ -9,6 +9,8 @@ import ai.lotus.app.ui.glass.glassRim
 import ai.lotus.app.ui.icons.LotusGlyph
 import ai.lotus.app.ui.icons.LotusIcon
 import ai.lotus.app.ui.theme.LotusPalette
+import ai.lotus.app.ui.motion.LotusSpringPreset
+import ai.lotus.app.ui.motion.lotusSpring
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -277,7 +279,7 @@ private fun MessageRow(
   val bubblePress by
     animateFloatAsState(
       targetValue = if (bubblePressed) 1f else 0f,
-      animationSpec = spring(dampingRatio = 0.5f, stiffness = 700f),
+      animationSpec = lotusSpring(LotusSpringPreset.Snappy),
       label = "bubblePress",
     )
   val bubbleLift =
@@ -492,7 +494,7 @@ private fun ProcessBlock(
       if (actions.isNotEmpty()) {
         Spacer(Modifier.width(6.dp))
         Text(
-          text = "${actions.size} 项工具记录",
+          text = "${actions.size} 次工具调用",
           color = LotusPalette.Ink.copy(alpha = 0.44f),
           fontSize = 10.sp,
         )
@@ -520,7 +522,7 @@ private fun ProcessBlock(
             lineHeight = 18.sp,
           )
         }
-        streaming -> {
+        streaming && actions.isEmpty() -> {
           Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
               text = "正在等待模型的思考内容",
@@ -531,9 +533,25 @@ private fun ProcessBlock(
             TypingDots()
           }
         }
+        streaming -> {
+          Text(
+            text = "工具动作已实时显示；模型尚未返回文字推理。",
+            color = LotusPalette.Ink.copy(alpha = 0.50f),
+            fontSize = 11.sp,
+            lineHeight = 16.sp,
+          )
+        }
         emptyHint -> {
           Text(
             text = "该模型没有返回思考过程，也没有触发工具。",
+            color = LotusPalette.Ink.copy(alpha = 0.46f),
+            fontSize = 11.sp,
+            lineHeight = 16.sp,
+          )
+        }
+        actions.isNotEmpty() -> {
+          Text(
+            text = "上游没有返回文字思考，仅记录了本次工具动作。",
             color = LotusPalette.Ink.copy(alpha = 0.46f),
             fontSize = 11.sp,
             lineHeight = 16.sp,
@@ -592,6 +610,7 @@ private fun ProcessBlock(
 private fun toolGlyph(label: String): LotusGlyph =
   when (label) {
     "联网" -> LotusGlyph.Globe
+    "Shizuku" -> LotusGlyph.Settings
     "生图" -> LotusGlyph.Sparkle
     "提示词" -> LotusGlyph.Doc
     "记住", "记忆", "用户记忆", "长期记忆" -> LotusGlyph.Doc
@@ -915,7 +934,7 @@ private fun AssistantAvatar(onClick: (() -> Unit)? = null) {
   val k by
     animateFloatAsState(
       targetValue = if (pressed) 1f else 0f,
-      animationSpec = spring(dampingRatio = 0.5f, stiffness = 700f),
+      animationSpec = lotusSpring(LotusSpringPreset.Snappy),
       label = "avatarPress",
     )
   Image(

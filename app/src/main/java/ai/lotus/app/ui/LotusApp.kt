@@ -1,11 +1,17 @@
 package ai.lotus.app.ui
 
 import ai.lotus.app.BuildConfig
+import ai.lotus.app.computer.ComputerToolContract
+import ai.lotus.app.computer.LinuxHubBridge
+import ai.lotus.app.shizuku.RootBridge
+import ai.lotus.app.shizuku.ShizukuBridge
+import ai.lotus.app.shizuku.ShizukuTools
 import ai.lotus.app.data.Attachments
 import ai.lotus.app.data.AvatarStore
 import ai.lotus.app.data.Capabilities
 import ai.lotus.app.data.CapabilityStore
 import ai.lotus.app.data.ChatEvent
+import ai.lotus.app.data.ChatToolCall
 import ai.lotus.app.data.ChatTurn
 import ai.lotus.app.data.Conversation
 import ai.lotus.app.data.AppPrefs
@@ -99,6 +105,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
@@ -162,6 +169,8 @@ private const val ContextSummaryPrompt =
  */
 @Composable
 fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
+  val rootState by RootBridge.state.collectAsState()
+  val shizukuState by ShizukuBridge.state.collectAsState()
   var tab by remember { mutableStateOf(LotusTab.Chat) }
   var draft by remember { mutableStateOf("") }
 
@@ -237,6 +246,9 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
   val savedSelection = remember { SelectionStore.load(context) }
   var selectedProviderId by remember { mutableStateOf(savedSelection.first) }
   var selectedModelId by remember { mutableStateOf(savedSelection.second) }
+  val selectedModelLabel =
+    providers.firstOrNull { it.id == selectedProviderId }?.displayName(selectedModelId)
+      ?: selectedModelId
 
   fun saveProviders(next: List<ProviderConfig>) {
     providers = next
@@ -862,12 +874,12 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
         false,
         "",
         System.currentTimeMillis(),
-        model = selectedModelId,
+        model = selectedModelLabel,
       )
     replyingId = replyId
 
     // 真正发出去的上下文（摘要 + 最近 N 条），别在流式过程中反复读整张列表。
-    val turns = requestTurns(excludeId = replyId)
+    val baseTurns = requestTurns(excludeId = replyId)
     // 联网搜索：设置里开的那个开关。开着时请求体只多一条 `web_search` 声明，
     // 搜索本身在上游做，客户端**不会**多发请求（见 LlmApi.chatStream 的注释）。
     //
@@ -881,6 +893,29 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
     val webSearch =
       AppPrefs.webSearchEnabled(context) &&
         searchProfile?.nativeWebSearch == ai.lotus.app.data.CapabilityStatus.Supported
+    // 客户端函数工具：Android 系统工具 + LinuxHub 电脑工具。联网搜索与函数工具可能同时
+    // 存在；不支持混合 tools 的上游会整轮失败，下面会保留 web_search 并自动退回纯函数工具。
+    // 不能因为联网开着就静默删掉 Shizuku 工具，否则模型会误以为设备没有授权。
+    val androidToolsReady = ShizukuTools.ready()
+    val computerToolsReady = LinuxHubBridge.ready()
+    val functionToolsReady = androidToolsReady || computerToolsReady
+    // 工具规则只在真实可用的后端已经验证通过时注入。
+    val activePolicies =
+      buildList {
+        if (androidToolsReady) add(ShizukuTools.policy)
+        if (computerToolsReady) add(ComputerToolContract.policy)
+      }
+    val turns =
+      if (activePolicies.isNotEmpty()) {
+        val systemAt = baseTurns.indexOfFirst { it.role == "system" }
+        val withPolicy = baseTurns.toMutableList()
+        val combined = activePolicies.joinToString("\n\n")
+        if (systemAt >= 0) withPolicy.add(systemAt + 1, ChatTurn("system", combined))
+        else withPolicy.add(0, ChatTurn("system", combined))
+        withPolicy
+      } else {
+        baseTurns
+      }
     // 只有"这一档真的对应一个字段"时才传；不传 = 上游走它自己的默认。
     val effort = currentThinking[safeThinkingIndex].reasoningEffort
 
@@ -912,10 +947,22 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
     // 上游报回来的"它读过哪些页面"（annotations / citations）。一把都没报就一直是空的 ——
     // 聊天页那行「访问记录」就不会出现。**不拿正文里的链接冒充**。
     val sourceBuf = linkedSetOf<String>()
+    val toolLogs = mutableListOf<String>()
+    var toolCallUsed = false
+    var toolCallsThisRun: List<ChatToolCall> = emptyList()
+    var toolRunSucceeded: Boolean? = null
+    var totalPromptTokens = 0
+    var totalCompletionTokens = 0
 
-    suspend fun runStream(attemptEffort: String?): Boolean {
+    suspend fun runStream(
+      attemptEffort: String?,
+      streamTurns: List<ChatTurn>,
+      allowFunctionTools: Boolean,
+      allowWebSearch: Boolean = webSearch,
+    ): Pair<Boolean, List<ChatToolCall>> {
       var gotText = false
       var failed = false
+      toolCallsThisRun = emptyList()
       // 重发时从头再来，别把上一次的残留标记接进这一轮。
       rawReply = ""
       reasoningBuf = ""
@@ -927,13 +974,23 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
       pendingWrites = emptyList()
       pendingTidy = emptyList()
       pendingRecalls = emptyList()
+      val functionTools =
+        if (allowFunctionTools) {
+          buildList {
+            if (ShizukuTools.ready()) addAll(ShizukuTools.specs)
+            if (LinuxHubBridge.ready()) addAll(ComputerToolContract.specs())
+          }
+        } else {
+          emptyList()
+        }
       LlmApi.chatStream(
           baseUrl = provider.baseUrl,
           apiKey = provider.apiKey,
           model = selectedModelId,
-          turns = turns,
+          turns = streamTurns,
           reasoningEffort = attemptEffort,
-          webSearch = webSearch,
+          webSearch = allowWebSearch && webSearch,
+          tools = functionTools,
         )
         .collect { event ->
           val index = messages.indexOfFirst { it.id == replyId }
@@ -969,18 +1026,27 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
             is ChatEvent.Usage -> {
               // 服务端报的真实 prompt_tokens —— 存下来，用量面板从此显示实测值。
               updateCurrent { it.copy(promptTokens = event.promptTokens) }
-              // 这一条自己的 token（prompt + completion），给「显示 token」那个开关用。
+              totalPromptTokens += event.promptTokens
+              totalCompletionTokens += event.completionTokens
+              // 一条回答如果经历“工具调用 → 最终回答”，这里显示两次请求的实测总量。
               val i = messages.indexOfFirst { it.id == replyId }
               if (i >= 0) {
                 messages[i] =
-                  messages[i].copy(tokens = event.promptTokens + event.completionTokens)
+                  messages[i].copy(tokens = totalPromptTokens + totalCompletionTokens)
               }
+            }
+            is ChatEvent.ToolCalls -> {
+              // 每轮最多接受一个工具调用。多个候选只取第一个，绝不形成 Agent 循环。
+              toolCallsThisRun = event.calls.take(1)
             }
             is ChatEvent.Failed -> {
               failed = true
               val old = messages[index].text
+              val warning = "⚠️ ${event.message}"
               messages[index] =
-                messages[index].copy(text = "⚠️ ${event.message}".let { if (old.isBlank()) it else old })
+                messages[index].copy(
+                  text = if (old.isBlank()) warning else "${old.trimEnd()}\n\n$warning"
+                )
             }
             ChatEvent.Done -> {
               val i = messages.indexOfFirst { it.id == replyId }
@@ -990,17 +1056,53 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
           // 每一片回来都落一次盘太费 IO，但流一结束必须落 —— 否则退出 App 就丢这次回答。
           if (event is ChatEvent.Done || event is ChatEvent.Failed) saveCurrent()
         }
-      return failed && !gotText
+      return (failed && !gotText) to toolCallsThisRun
     }
 
     scope.launch {
-      val rejected = runStream(effort)
-      // 上游不认这一档（比如 gpt-6-luna 的 ultra）→ 把思考参数摘掉重发一次。
-      // 面板里给的是**官方档位名**，认不认由上游说话；这里保证"选了最猛的一档不会直接聊崩"。
-      if (rejected && effort != null) {
+      var outcome = runStream(effort, turns, functionToolsReady, allowWebSearch = webSearch)
+      // 上游不接受 web_search 与 function tools 混用：先摘联网，保住 Shizuku/电脑工具。
+      if (outcome.first && functionToolsReady && webSearch) {
         val index = messages.indexOfFirst { it.id == replyId }
         if (index >= 0) messages[index] = messages[index].copy(text = "")
-        runStream(null)
+        outcome = runStream(effort, turns, allowFunctionTools = true, allowWebSearch = false)
+      }
+      // 函数工具本身也不被接受：再退回只保留联网的纯聊天。
+      if (outcome.first && functionToolsReady) {
+        val index = messages.indexOfFirst { it.id == replyId }
+        if (index >= 0) messages[index] = messages[index].copy(text = "")
+        outcome = runStream(effort, turns, allowFunctionTools = false, allowWebSearch = webSearch)
+      }
+      // 思考档位也不被接受时，最后摘掉 reasoning_effort。
+      if (outcome.first && effort != null) {
+        val index = messages.indexOfFirst { it.id == replyId }
+        if (index >= 0) messages[index] = messages[index].copy(text = "")
+        outcome = runStream(null, turns, allowFunctionTools = false, allowWebSearch = webSearch)
+      }
+      // 单次工具调用：执行一次 → 把结构化结果回填给同一轮模型 → 然后必须结束。
+      val call = outcome.second.firstOrNull()
+      if (call != null && !toolCallUsed) {
+        toolCallUsed = true
+        val toolResult =
+          if (ComputerToolContract.isComputerTool(call.name)) {
+            ComputerToolContract.execute(context, call)
+          } else {
+            ShizukuTools.execute(call)
+          }
+        toolRunSucceeded = toolResult.ok
+        toolLogs += toolResult.log
+        val index = messages.indexOfFirst { it.id == replyId }
+        if (index >= 0) messages[index] = messages[index].copy(text = "", reasoning = "")
+        val toolTurns =
+          turns +
+            ChatTurn(role = "assistant", content = "", toolCalls = listOf(call)) +
+            ChatTurn(role = "tool", content = toolResult.payload, toolCallId = call.id)
+        outcome = runStream(effort, toolTurns, allowFunctionTools = false)
+        if (outcome.first && effort != null) {
+          val i = messages.indexOfFirst { it.id == replyId }
+          if (i >= 0) messages[i] = messages[i].copy(text = "", reasoning = "")
+          outcome = runStream(null, toolTurns, allowFunctionTools = false)
+        }
       }
       // 模型自己记下的东西 → 按语义分开落盘。用户手写的内容永远不动。
       val memoryFiles = linkedSetOf<String>()
@@ -1083,12 +1185,15 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
           if (archived.isNotEmpty()) add("归档")
           if (tidied) add("整理")
           if (webSearch) add("联网")
+          if (toolLogs.any { it.startsWith("LinuxHub｜") }) add("电脑")
+          if (toolLogs.any { !it.startsWith("LinuxHub｜") }) add("系统工具")
           if (didImage) add("生图")
         }
       // 每个动作的**明细** —— 用户口径：「那些调用工具我也不能看详细内容」。
       // 光一个"记住"标签看不出写了什么，所以把真正落盘的内容/文件名/画面描述都记下来。
       val toolLog =
         buildList {
+          addAll(toolLogs)
           if (memoryFiles.isNotEmpty()) {
             val detail =
               (userEntries + memoEntries).take(2).joinToString("；").take(90)
@@ -1116,8 +1221,26 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
       if (ti >= 0) {
         // 即使这一轮没有工具，也要把上游返回的来源落盘；否则界面明明拿到了 URL，
         // 退出会话再回来就丢了。工具列表为空是事实，不补假数据。
+        val currentText = messages[ti].text.trim()
+        val completedText =
+          when {
+            toolRunSucceeded == true &&
+              currentText.isNotBlank() &&
+              !currentText.startsWith("已完成") &&
+              !currentText.startsWith("完成") -> "已完成：\n$currentText"
+            toolRunSucceeded == false &&
+              currentText.isNotBlank() &&
+              !currentText.startsWith("未完成") &&
+              !currentText.startsWith("失败") -> "未完成：\n$currentText"
+            else -> messages[ti].text
+          }
         messages[ti] =
-          messages[ti].copy(tools = usedTools, toolLog = toolLog, sources = sourceBuf.toList())
+          messages[ti].copy(
+            text = completedText,
+            tools = usedTools,
+            toolLog = toolLog,
+            sources = sourceBuf.toList(),
+          )
       }
       // 当天的对话流水：写进 md/memory/YYYY-MM-DD.md。**纯本地、零 token**（见 Prompts.appendDailyLog）。
       // 这就是 OpenClaw 那种"memory 里按天记日志"的路子 —— 只不过我们不把它塞回每轮请求里。
@@ -1344,6 +1467,10 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
               checkingUpdate = updateChecking,
               onCheckUpdate = { runUpdateCheck() },
               onBackupImported = { reloadImportedData() },
+              rootState = rootState,
+              onConnectRoot = { RootBridge.connectNow() },
+              shizukuState = shizukuState,
+              onConnectShizuku = { ShizukuBridge.connectNow() },
               bottomInset = bottomInset,
             )
         }
@@ -1542,7 +1669,7 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
               onSend = { send() },
               onHeightChange = { composerHeight = it },
               // 显示名优先用提供方给的原始 id（gpt-6-luna 这种），认不出就原样显示。
-              modelLabel = selectedModelId,
+              modelLabel = selectedModelLabel,
               thinkingLabel = currentThinking.getOrNull(safeThinkingIndex)?.label.orEmpty(),
               modifier =
                 Modifier.align(Alignment.BottomCenter)
@@ -1632,7 +1759,14 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
               val groups =
                 providers
                   .filter { it.models.isNotEmpty() }
-                  .map { ModelGroup(it.id, it.name.ifBlank { "未命名提供方" }, it.models) }
+                  .map {
+                    ModelGroup(
+                      it.id,
+                      it.name.ifBlank { "未命名提供方" },
+                      it.models,
+                      it.modelDisplayNames,
+                    )
+                  }
               GlassComposerPanel(
                 groups = groups,
                 selectedProviderId = selectedProviderId,
@@ -1696,6 +1830,10 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
               imageReady = capabilities.ready(ai.lotus.app.data.CapabilityKind.Image),
               videoReady = capabilities.ready(ai.lotus.app.data.CapabilityKind.Video),
               ocrReady = capabilities.ready(ai.lotus.app.data.CapabilityKind.Ocr),
+              rootState = rootState,
+              onConnectRoot = { RootBridge.connectNow() },
+              shizukuState = shizukuState,
+              onConnectShizuku = { ShizukuBridge.connectNow() },
               onDismiss = { toolsOpen = false },
             )
           }

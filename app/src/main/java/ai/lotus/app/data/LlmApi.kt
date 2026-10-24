@@ -8,6 +8,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -111,6 +112,24 @@ data class ChatTurn(
   val imageDataUrl: String? = null,
   /** OpenAI 兼容请求里的多图列表；与 [imageDataUrl] 同时存在时会合并。 */
   val imageDataUrls: List<String> = emptyList(),
+  /** assistant 发起的工具调用。只用于紧跟其后的 tool 结果回合。 */
+  val toolCalls: List<ChatToolCall> = emptyList(),
+  /** role=tool 时，对应哪一次 assistant tool_call。 */
+  val toolCallId: String? = null,
+)
+
+/** OpenAI 兼容函数工具声明。 */
+data class ChatToolSpec(
+  val name: String,
+  val description: String,
+  val parameters: JsonObject,
+)
+
+/** 模型真正发回的一次工具调用。 */
+data class ChatToolCall(
+  val id: String,
+  val name: String,
+  val arguments: String,
 )
 
 /** 流式聊天里往外吐的东西。 */
@@ -149,6 +168,9 @@ sealed interface ChatEvent {
    */
   data class Sources(val urls: List<String>) : ChatEvent
 
+  /** 模型请求调用客户端工具。调用方最多执行一次，不应形成工具循环。 */
+  data class ToolCalls(val calls: List<ChatToolCall>) : ChatEvent
+
   /** 失败，带一句能直接给用户看的原因。 */
   data class Failed(val message: String) : ChatEvent
 
@@ -180,6 +202,7 @@ fun LlmApi.chatStream(
    * 所以默认关闭、由用户在设置里自己开。
    */
   webSearch: Boolean = false,
+  tools: List<ChatToolSpec> = emptyList(),
 ): Flow<ChatEvent> = flow {
   val base = baseUrl.trim().trimEnd('/')
   if (base.isEmpty() || !base.startsWith("http")) {
@@ -206,34 +229,61 @@ fun LlmApi.chatStream(
                     t.imageDataUrl?.takeIf { it.isNotBlank() }?.let(::add)
                     addAll(t.imageDataUrls.filter { it.isNotBlank() })
                   }.distinct()
-                if (images.isEmpty()) {
-                  put("content", JsonPrimitive(t.content))
-                } else {
-                  // 多模态：一段文字 + 多张图。OpenAI 兼容接口按 image_url 的数量逐张接收。
-                  put(
-                    "content",
-                    JsonArray(
-                      buildList {
-                        add(
+                when {
+                  t.toolCallId != null -> {
+                    put("tool_call_id", JsonPrimitive(t.toolCallId))
+                    put("content", JsonPrimitive(t.content))
+                  }
+                  t.toolCalls.isNotEmpty() -> {
+                    if (t.content.isBlank()) put("content", JsonNull)
+                    else put("content", JsonPrimitive(t.content))
+                    put(
+                      "tool_calls",
+                      JsonArray(
+                        t.toolCalls.map { call ->
                           buildJsonObject {
-                            put("type", JsonPrimitive("text"))
-                            put("text", JsonPrimitive(t.content))
+                            put("id", JsonPrimitive(call.id))
+                            put("type", JsonPrimitive("function"))
+                            put(
+                              "function",
+                              buildJsonObject {
+                                put("name", JsonPrimitive(call.name))
+                                put("arguments", JsonPrimitive(call.arguments))
+                              },
+                            )
                           }
-                        )
-                        images.forEach { image ->
+                        }
+                      ),
+                    )
+                  }
+                  images.isEmpty() -> put("content", JsonPrimitive(t.content))
+                  else -> {
+                    // 多模态：一段文字 + 多张图。OpenAI 兼容接口按 image_url 的数量逐张接收。
+                    put(
+                      "content",
+                      JsonArray(
+                        buildList {
                           add(
                             buildJsonObject {
-                              put("type", JsonPrimitive("image_url"))
-                              put(
-                                "image_url",
-                                buildJsonObject { put("url", JsonPrimitive(image)) },
-                              )
+                              put("type", JsonPrimitive("text"))
+                              put("text", JsonPrimitive(t.content))
                             }
                           )
+                          images.forEach { image ->
+                            add(
+                              buildJsonObject {
+                                put("type", JsonPrimitive("image_url"))
+                                put(
+                                  "image_url",
+                                  buildJsonObject { put("url", JsonPrimitive(image)) },
+                                )
+                              }
+                            )
+                          }
                         }
-                      }
-                    ),
-                  )
+                      ),
+                    )
+                  }
                 }
               }
             }
@@ -249,11 +299,30 @@ fun LlmApi.chatStream(
         // 联网搜索：只加一个声明，真正的搜索和抓取都在上游做。
         // 注意是 `{"type":"web_search"}`（原生搜索），不是自定义 function ——
         // 后者会让模型回一个 tool_call 交给客户端执行，那就变成 Agent 循环了，正是要避开的。
-        if (webSearch) {
-          put(
-            "tools",
-            JsonArray(listOf(buildJsonObject { put("type", JsonPrimitive("web_search")) })),
-          )
+        val toolDeclarations =
+          buildList {
+            if (webSearch) {
+              add(buildJsonObject { put("type", JsonPrimitive("web_search")) })
+            }
+            tools.forEach { tool ->
+              add(
+                buildJsonObject {
+                  put("type", JsonPrimitive("function"))
+                  put(
+                    "function",
+                    buildJsonObject {
+                      put("name", JsonPrimitive(tool.name))
+                      put("description", JsonPrimitive(tool.description))
+                      put("parameters", tool.parameters)
+                    },
+                  )
+                }
+              )
+            }
+          }
+        if (toolDeclarations.isNotEmpty()) {
+          put("tools", JsonArray(toolDeclarations))
+          if (tools.isNotEmpty()) put("tool_choice", JsonPrimitive("auto"))
         }
       }
       .toString()
@@ -280,18 +349,25 @@ fun LlmApi.chatStream(
     }
 
     var serverStreamError = ""
+    var sawDone = false
+    var lastFinishReason = ""
+    val pendingToolCalls = linkedMapOf<Int, PendingToolCall>()
     conn.inputStream.bufferedReader().use { reader ->
       var line = reader.readLine()
       stream@ while (line != null) {
         if (line.startsWith("data:")) {
           val payload = line.removePrefix("data:").trim()
-          if (payload == "[DONE]") break
+          if (payload == "[DONE]") {
+            sawDone = true
+            break
+          }
           streamError(payload)?.let {
             serverStreamError = it
             break@stream
           }
           responseModel(payload)?.let { emit(ChatEvent.ModelInfo(it)) }
           parseUsage(payload)?.let { emit(it) }
+          finishReason(payload)?.let { lastFinishReason = it }
           // 先推理、后正文：上游通常先吐一段 reasoning_content，正文才跟着来。
           val reason = deltaReasoning(payload)
           if (reason.isNotEmpty()) emit(ChatEvent.Reasoning(reason))
@@ -299,6 +375,7 @@ fun LlmApi.chatStream(
           if (text.isNotEmpty()) emit(ChatEvent.Delta(text))
           val cites = deltaSources(payload)
           if (cites.isNotEmpty()) emit(ChatEvent.Sources(cites))
+          collectToolCallDeltas(payload, pendingToolCalls)
         }
         line = reader.readLine()
       }
@@ -307,6 +384,22 @@ fun LlmApi.chatStream(
       emit(ChatEvent.Failed("上游流错误：${serverStreamError.take(220)}"))
       return@flow
     }
+    if (!sawDone && lastFinishReason.isBlank()) {
+      emit(ChatEvent.Failed("上游连接提前结束，回答可能未完成"))
+      return@flow
+    }
+    when (lastFinishReason) {
+      "length" -> {
+        emit(ChatEvent.Failed("回答达到输出上限，内容可能未完成"))
+        return@flow
+      }
+      "content_filter" -> {
+        emit(ChatEvent.Failed("上游内容过滤器中断了这次回答"))
+        return@flow
+      }
+    }
+    val toolCalls = pendingToolCalls.toSortedMap().values.mapNotNull { it.build() }
+    if (toolCalls.isNotEmpty()) emit(ChatEvent.ToolCalls(toolCalls))
     emit(ChatEvent.Done)
   } catch (t: Throwable) {
     emit(ChatEvent.Failed(t.message ?: t::class.java.simpleName))
@@ -314,6 +407,47 @@ fun LlmApi.chatStream(
     conn?.disconnect()
   }
 }.flowOn(Dispatchers.IO)
+
+private data class PendingToolCall(
+  var id: String = "",
+  var name: String = "",
+  val arguments: StringBuilder = StringBuilder(),
+) {
+  fun build(): ChatToolCall? {
+    if (name.isBlank()) return null
+    return ChatToolCall(
+      id = id.ifBlank { "lotus_${name}_${arguments.length}" },
+      name = name,
+      arguments = arguments.toString().ifBlank { "{}" },
+    )
+  }
+}
+
+/**
+ * 流式 function call 的参数会拆成多个 JSON 片段。按 tool_calls[index] 累积，
+ * 不在这里执行，也不允许模型在一次回答里串出多轮循环。
+ */
+private fun collectToolCallDeltas(
+  payload: String,
+  pending: MutableMap<Int, PendingToolCall>,
+) {
+  runCatching {
+    val root = SseJson.parseToJsonElement(payload).jsonObject
+    val choices = root["choices"] as? JsonArray ?: return
+    val first = choices.firstOrNull() as? JsonObject ?: return
+    val delta = first["delta"] as? JsonObject ?: first["message"] as? JsonObject ?: return
+    val calls = delta["tool_calls"] as? JsonArray ?: return
+    calls.forEachIndexed { fallbackIndex, element ->
+      val call = element as? JsonObject ?: return@forEachIndexed
+      val index = (call["index"] as? JsonPrimitive)?.contentOrNull?.toIntOrNull() ?: fallbackIndex
+      val slot = pending.getOrPut(index) { PendingToolCall() }
+      (call["id"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }?.let { slot.id = it }
+      val fn = call["function"] as? JsonObject ?: return@forEachIndexed
+      (fn["name"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }?.let { slot.name += it }
+      (fn["arguments"] as? JsonPrimitive)?.contentOrNull?.let { slot.arguments.append(it) }
+    }
+  }
+}
 
 /** 从 SSE 帧顶层读取 `model`。没有就返回 null，不拿请求参数冒充响应回显。 */
 private fun responseModel(payload: String): String? =
@@ -375,27 +509,62 @@ private fun deltaText(payload: String): String =
     }
     .getOrDefault("")
 
-/** 推理字段的常见叫法，按优先级试。 */
-private val ReasoningKeys = listOf("reasoning_content", "reasoning", "reasoning_text")
+/** 推理字段的常见叫法，按优先级试。不同网关还会把同一段放在数组 / 对象里。 */
+private val ReasoningKeys =
+  listOf("reasoning_content", "reasoning_text", "reasoning", "thinking", "reasoning_details")
+
+/** 把几种常见推理载荷统一压成纯文字。 */
+private fun reasoningText(element: JsonElement?): String =
+  when (element) {
+    is JsonPrimitive -> element.contentOrNull.orEmpty()
+    is JsonArray -> element.joinToString("") { reasoningText(it) }
+    is JsonObject -> {
+      val direct =
+        listOf("text", "content", "summary", "delta")
+          .asSequence()
+          .map { reasoningText(element[it]) }
+          .firstOrNull { it.isNotEmpty() }
+          .orEmpty()
+      if (direct.isNotEmpty()) direct
+      else {
+        // 有的实现用 `{type: "reasoning", details: [...]}` 再包一层。
+        listOf("details", "parts", "items")
+          .asSequence()
+          .map { reasoningText(element[it]) }
+          .firstOrNull { it.isNotEmpty() }
+          .orEmpty()
+      }
+    }
+    else -> ""
+  }
 
 /**
  * 从一条 SSE 分片里抠出**推理增量**。
  *
- * 各家命名不统一，所以三个都认；一个都没有就返回空串 —— 调用方据此什么都不发。
+ * 各家命名不统一，所以常见的五个都认；一个都没有就返回空串 —— 调用方据此什么都不发。
  */
 private fun deltaReasoning(payload: String): String =
   runCatching {
       val root = SseJson.parseToJsonElement(payload).jsonObject
-      val choices = root["choices"] as? JsonArray ?: return ""
-      val first = choices.firstOrNull() as? JsonObject ?: return ""
-      val delta = first["delta"] as? JsonObject ?: return ""
-      for (k in ReasoningKeys) {
-        val v = (delta[k] as? JsonPrimitive)?.contentOrNull
-        if (!v.isNullOrEmpty()) return v
+      val first = (root["choices"] as? JsonArray)?.firstOrNull() as? JsonObject
+      for (container in listOfNotNull(first?.get("delta") as? JsonObject, first?.get("message") as? JsonObject, root)) {
+        for (k in ReasoningKeys) {
+          val v = reasoningText(container[k])
+          if (v.isNotEmpty()) return v
+        }
       }
       ""
     }
     .getOrDefault("")
+
+/** 读取 `choices[0].finish_reason`；流结束帧通常只带这个字段。 */
+private fun finishReason(payload: String): String? =
+  runCatching {
+      val root = SseJson.parseToJsonElement(payload).jsonObject
+      val first = (root["choices"] as? JsonArray)?.firstOrNull() as? JsonObject
+      (first?.get("finish_reason") as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+    }
+    .getOrNull()
 
 /**
  * 从一帧 SSE 里抠 `annotations` 里的 URL 引用。

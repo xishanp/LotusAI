@@ -12,6 +12,8 @@ import ai.lotus.app.ui.settings.Hairline
 import ai.lotus.app.ui.settings.SettingsGroup
 import ai.lotus.app.ui.settings.SettingsScaffold
 import ai.lotus.app.ui.theme.LotusPalette
+import ai.lotus.app.ui.motion.LotusSpringPreset
+import ai.lotus.app.ui.motion.lotusSpring
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -182,7 +184,7 @@ private fun MdRow(name: String, meta: String, isDir: Boolean, onClick: () -> Uni
   val press by
     animateFloatAsState(
       targetValue = if (pressed) 1f else 0f,
-      animationSpec = spring(dampingRatio = 0.55f, stiffness = 700f),
+      animationSpec = lotusSpring(LotusSpringPreset.Snappy),
       label = "mdRowDim",
     )
   Row(

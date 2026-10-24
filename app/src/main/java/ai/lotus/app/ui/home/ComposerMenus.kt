@@ -10,6 +10,8 @@ import ai.lotus.app.ui.model.ThinkingOption
 import ai.lotus.app.ui.theme.LotusPalette
 import android.graphics.BitmapFactory
 import android.net.Uri
+import ai.lotus.app.ui.motion.LotusSpringPreset
+import ai.lotus.app.ui.motion.lotusSpring
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.animation.AnimatedVisibility
@@ -196,7 +198,15 @@ private fun rememberBitmap(uri: Uri): ImageBitmap? {
 }
 
 /** 模型面板里的一组：一个提供方 + 它下面的模型。 */
-data class ModelGroup(val id: String, val name: String, val models: List<String>)
+data class ModelGroup(
+  val id: String,
+  val name: String,
+  val models: List<String>,
+  val displayNames: Map<String, String> = emptyMap(),
+) {
+  fun modelLabel(modelId: String): String =
+    displayNames[modelId]?.trim()?.takeIf { it.isNotEmpty() } ?: modelId
+}
 
 /**
  * 输入条上方那**一块**面板：上半选模型，下半选思考等级。
@@ -275,7 +285,7 @@ fun GlassComposerPanel(
           val rotation by
             animateFloatAsState(
               targetValue = if (open) 90f else 0f,
-              animationSpec = spring(dampingRatio = 0.7f, stiffness = 900f),
+              animationSpec = lotusSpring(LotusSpringPreset.Snappy),
               label = "groupChevron",
             )
           LotusIcon(
@@ -307,7 +317,7 @@ fun GlassComposerPanel(
                 verticalAlignment = Alignment.CenterVertically,
               ) {
                 Text(
-                  text = id,
+                  text = group.modelLabel(id),
                   color = if (picked) LotusPalette.Ink else LotusPalette.Ink.copy(alpha = 0.78f),
                   fontSize = 14.sp,
                   maxLines = 1,

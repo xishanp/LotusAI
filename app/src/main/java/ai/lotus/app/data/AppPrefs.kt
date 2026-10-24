@@ -22,6 +22,7 @@ object AppPrefs {
   private const val KeyShowTokens = "showTokens"
   private const val KeyShowChars = "showChars"
   private const val KeyOnboardingCompleted = "onboardingCompleted"
+  private const val KeyLinuxHubToken = "linuxHubToken"
 
   /** 助手显示名。空 = 用户清空了输入框，显示时回退到 [DefaultAssistantName]。 */
   fun assistantName(context: Context): String =
@@ -42,6 +43,19 @@ object AppPrefs {
 
   fun setOnboardingCompleted(context: Context, value: Boolean) {
     prefs(context).edit().putBoolean(KeyOnboardingCompleted, value).apply()
+  }
+
+  /**
+   * LinuxHub 本机 Agent 的 Bearer Token。
+   *
+   * Token 由 LinuxHub 生成，Lotus 只保存用户粘贴进来的副本。它是隐私凭据：
+   * 不写日志、不拼进错误文案，也不进入聊天上下文。
+   */
+  fun linuxHubToken(context: Context): String =
+    prefs(context).getString(KeyLinuxHubToken, "").orEmpty()
+
+  fun setLinuxHubToken(context: Context, value: String) {
+    prefs(context).edit().putString(KeyLinuxHubToken, value.trim()).apply()
   }
 
   // ---- 提示词 / 记忆：开不开、带多少 ----

@@ -1,6 +1,10 @@
 package ai.lotus.app.ui.glass
 
 import ai.lotus.app.ui.theme.LotusPalette
+import ai.lotus.app.ui.motion.LotusSpringPreset
+import ai.lotus.app.ui.motion.lotusPressSpring
+import ai.lotus.app.ui.motion.lotusReleaseSpring
+import ai.lotus.app.ui.motion.lotusSpring
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -640,7 +644,7 @@ fun rowPress(shape: Shape, scale: Float = 1.03f, strength: Float = 0.34f): RowPr
   val press by
     animateFloatAsState(
       targetValue = if (pressed) 1f else 0f,
-      animationSpec = spring(dampingRatio = 0.55f, stiffness = 700f),
+      animationSpec = lotusSpring(LotusSpringPreset.Snappy),
       label = "rowPress",
     )
   return RowPress(
@@ -762,9 +766,9 @@ fun LiquidGlassIconButton(
   LaunchedEffect(pressed) {
     onPressedChange?.invoke(pressed)
     if (pressed) {
-      press.animateTo(1f, spring(dampingRatio = 1f, stiffness = 1600f))
+      press.animateTo(1f, lotusPressSpring())
     } else {
-      press.animateTo(0f, spring(dampingRatio = 0.92f, stiffness = 700f))
+      press.animateTo(0f, lotusReleaseSpring())
     }
   }
 

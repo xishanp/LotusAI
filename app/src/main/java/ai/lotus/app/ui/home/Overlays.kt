@@ -1,5 +1,10 @@
 package ai.lotus.app.ui.home
 
+import ai.lotus.app.shizuku.RootPhase
+import ai.lotus.app.shizuku.RootState
+import ai.lotus.app.shizuku.ShizukuPhase
+import ai.lotus.app.shizuku.ShizukuState
+
 import ai.lotus.app.data.Conversation
 import ai.lotus.app.ui.glass.LiquidGlassIconButton
 import ai.lotus.app.ui.glass.floatGlass
@@ -10,6 +15,8 @@ import ai.lotus.app.ui.glass.rowPress
 import ai.lotus.app.ui.icons.LotusGlyph
 import ai.lotus.app.ui.icons.LotusIcon
 import ai.lotus.app.ui.theme.LotusPalette
+import ai.lotus.app.ui.motion.LotusSpringPreset
+import ai.lotus.app.ui.motion.lotusSpring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Canvas
@@ -329,7 +336,7 @@ private fun DialogButton(
   val k by
     animateFloatAsState(
       targetValue = if (pressed) 1f else 0f,
-      animationSpec = spring(dampingRatio = 0.55f, stiffness = 700f),
+      animationSpec = lotusSpring(LotusSpringPreset.Snappy),
       label = "dialogBtnPress",
     )
   Box(
@@ -592,7 +599,7 @@ private fun PanelPill(
   val pressK by
     animateFloatAsState(
       targetValue = if (pressed) 1f else 0f,
-      animationSpec = spring(dampingRatio = 0.45f, stiffness = 900f),
+      animationSpec = lotusSpring(LotusSpringPreset.Snappy),
       label = "panelPillPress",
     )
   Box(
@@ -627,7 +634,7 @@ private fun PanelRow(text: String, onClick: () -> Unit) {
   val press by
     animateFloatAsState(
       targetValue = if (pressed) 1f else 0f,
-      animationSpec = spring(dampingRatio = 0.55f, stiffness = 700f),
+      animationSpec = lotusSpring(LotusSpringPreset.Snappy),
       label = "panelRowPress",
     )
   Row(
@@ -773,7 +780,7 @@ private fun AttachRow(text: String, onClick: () -> Unit) {
   val press by
     animateFloatAsState(
       targetValue = if (pressed) 1f else 0f,
-      animationSpec = spring(dampingRatio = 0.55f, stiffness = 700f),
+      animationSpec = lotusSpring(LotusSpringPreset.Snappy),
       label = "attachRowPress",
     )
   Row(
@@ -806,7 +813,11 @@ fun GlassToolsPanel(
   imageReady: Boolean,
   videoReady: Boolean,
   ocrReady: Boolean,
+  rootState: RootState,
+  shizukuState: ShizukuState,
   modifier: Modifier = Modifier,
+  onConnectRoot: () -> Unit = {},
+  onConnectShizuku: () -> Unit = {},
   onDismiss: () -> Unit,
 ) {
   val shape = RoundedCornerShape(26.dp)
@@ -836,6 +847,37 @@ fun GlassToolsPanel(
       ToolLine("解析器", "连视觉都没有的模型：先把图 / 文档里的字抠出来再喂给它", if (ocrReady) "已配" else "未配置"),
       ToolLine("视觉理解", "模型自己就能看图（发图前会先判断这一条支不支持）", "看上游"),
     )
+  val rootService =
+    when (rootState.phase) {
+      RootPhase.Ready -> "已连接"
+      RootPhase.Requesting -> "请求中"
+      RootPhase.Denied -> "未授权"
+      RootPhase.Error -> "异常"
+      RootPhase.NotRequested -> "未连接"
+    }
+  val rootIdentity =
+    when (rootState.phase) {
+      RootPhase.Ready -> "root"
+      RootPhase.Requesting -> "等待授权"
+      RootPhase.Denied, RootPhase.Error -> rootState.message
+      RootPhase.NotRequested -> "未请求"
+    }
+  val shizukuService =
+    when (shizukuState.phase) {
+      ShizukuPhase.Ready -> "已连接"
+      ShizukuPhase.PermissionRequired -> "待授权"
+      ShizukuPhase.Connecting -> "连接中"
+      ShizukuPhase.Error -> "异常"
+      ShizukuPhase.Unavailable -> "未连接"
+    }
+  val shizukuIdentity =
+    when (shizukuState.phase) {
+      ShizukuPhase.Ready -> shizukuState.identity.ifBlank { "未知" }
+      ShizukuPhase.PermissionRequired -> "未授权"
+      ShizukuPhase.Connecting -> "准备中"
+      ShizukuPhase.Error -> "未知"
+      ShizukuPhase.Unavailable -> "未知"
+    }
 
   Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
     Box(
@@ -863,7 +905,7 @@ fun GlassToolsPanel(
       Text("工具", color = LotusPalette.Ink, fontSize = 16.sp, fontWeight = FontWeight.Medium)
       Spacer(Modifier.height(2.dp))
       Text(
-        "这些是它现在能用的全部能力。用什么、能不能用，取决于你配的提供方。",
+        "按本机真实配置显示；未配置的能力不会假装可用。",
         color = LotusPalette.InkMuted,
         fontSize = 11.sp,
         lineHeight = 16.sp,
@@ -885,13 +927,60 @@ fun GlassToolsPanel(
           )
         }
       }
+      Spacer(Modifier.height(8.dp))
+      Box(Modifier.fillMaxWidth().height(0.7.dp).background(LotusPalette.Hairline))
+      Spacer(Modifier.height(10.dp))
+      Text("系统工具", color = LotusPalette.Ink, fontSize = 13.sp)
+      Spacer(Modifier.height(2.dp))
+      Text(
+        "Root 优先，Shizuku 兜底；固定白名单工具，不开放任意 shell。",
+        color = LotusPalette.InkMuted,
+        fontSize = 10.5.sp,
+        lineHeight = 15.sp,
+      )
+      Spacer(Modifier.height(7.dp))
+      ToolStatusRow("Root 权限", rootService)
+      Spacer(Modifier.height(5.dp))
+      ToolStatusRow("Root 身份", rootIdentity)
+      Spacer(Modifier.height(7.dp))
+      ToolStatusRow("Shizuku 服务", shizukuService)
+      Spacer(Modifier.height(5.dp))
+      ToolStatusRow("Shizuku 身份", shizukuIdentity)
       Spacer(Modifier.height(14.dp))
-      DialogButton(text = "好", primary = true, modifier = Modifier.fillMaxWidth()) { onDismiss() }
+      if (rootState.phase != RootPhase.Ready) {
+        DialogButton(text = "获取 Root 权限", primary = true, modifier = Modifier.fillMaxWidth()) {
+          onConnectRoot()
+        }
+        Spacer(Modifier.height(8.dp))
+      }
+      if (shizukuState.phase != ShizukuPhase.Ready) {
+        DialogButton(
+          text = "连接 Shizuku",
+          primary = rootState.phase != RootPhase.Ready,
+          modifier = Modifier.fillMaxWidth(),
+        ) {
+          onConnectShizuku()
+        }
+        Spacer(Modifier.height(8.dp))
+      }
+      DialogButton(
+        text = "好",
+        primary = rootState.phase == RootPhase.Ready || shizukuState.phase == ShizukuPhase.Ready,
+        modifier = Modifier.fillMaxWidth(),
+      ) { onDismiss() }
     }
   }
 }
 
 private data class ToolLine(val name: String, val detail: String, val state: String)
+
+@Composable
+private fun ToolStatusRow(name: String, value: String) {
+  Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+    Text(name, color = LotusPalette.InkMuted, fontSize = 11.sp, modifier = Modifier.weight(1f))
+    Text(value, color = LotusPalette.Ink, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+  }
+}
 
 /** 来源玻璃上的文字柔光：不靠白底板，也能压在背景纹理上读清。 */
 private val SourceTextGlow =

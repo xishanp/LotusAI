@@ -21,6 +21,8 @@ data class ProviderConfig(
   val baseUrl: String = "",
   val apiKey: String = "",
   val models: List<String> = emptyList(),
+  /** 仅用于界面展示；不会改写 models 里的真实上游 id。 */
+  val modelDisplayNames: Map<String, String> = emptyMap(),
   val lastError: String? = null,
   val lastTestedAt: Long = 0L,
   /**
@@ -31,6 +33,9 @@ data class ProviderConfig(
    */
   val contextWindow: Int = DefaultContextWindow,
 ) {
+  fun displayName(modelId: String): String =
+    modelDisplayNames[modelId]?.trim()?.takeIf { it.isNotEmpty() } ?: modelId
+
   /** 三项都填齐了没有。 */
   val isComplete: Boolean
     get() = baseUrl.isNotBlank() && apiKey.isNotBlank()

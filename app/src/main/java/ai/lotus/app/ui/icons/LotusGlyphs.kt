@@ -68,6 +68,8 @@ enum class LotusGlyph {
   Doc,
   /** 📁 文件夹（MD 工作区） */
   Folder,
+  /** 💻 Lotus的电脑（外部 LinuxHub 容器） */
+  Computer,
   /** 🗄 已归档 */
   Archive,
   /** ⓘ 关于 */
@@ -118,6 +120,7 @@ fun LotusIcon(glyph: LotusGlyph, tint: Color, modifier: Modifier = Modifier) {
       LotusGlyph.Globe -> drawGlobe(w, h, tint, stroke)
       LotusGlyph.Doc -> drawDoc(w, h, tint, stroke)
       LotusGlyph.Folder -> drawFolder(w, h, tint, stroke)
+      LotusGlyph.Computer -> drawComputer(w, h, tint, stroke)
       LotusGlyph.Archive -> drawArchive(w, h, tint, stroke)
       LotusGlyph.Info -> drawInfo(w, h, tint, stroke)
       LotusGlyph.Key -> drawKey(w, h, tint, stroke)
@@ -398,6 +401,20 @@ private fun DrawScope.drawFolder(w: Float, h: Float, c: Color, s: Stroke) {
       close()
     }
   drawPath(p, c, style = s)
+}
+
+/** 电脑：Lotus的电脑 / LinuxHub 外部容器入口。 */
+private fun DrawScope.drawComputer(w: Float, h: Float, c: Color, s: Stroke) {
+  drawRoundRect(
+    color = c,
+    topLeft = Offset(0.12f * w, 0.16f * h),
+    size = Size(0.76f * w, 0.52f * h),
+    cornerRadius = CornerRadius(0.09f * w),
+    style = s,
+  )
+  drawLine(c, Offset(0.34f * w, 0.82f * h), Offset(0.66f * w, 0.82f * h), s.width, StrokeCap.Round)
+  drawLine(c, Offset(0.46f * w, 0.68f * h), Offset(0.46f * w, 0.82f * h), s.width, StrokeCap.Round)
+  drawLine(c, Offset(0.54f * w, 0.68f * h), Offset(0.54f * w, 0.82f * h), s.width, StrokeCap.Round)
 }
 
 /** 归档盒。 */
