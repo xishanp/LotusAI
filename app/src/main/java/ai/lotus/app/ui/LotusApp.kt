@@ -2,6 +2,7 @@ package ai.lotus.app.ui
 
 import ai.lotus.app.BuildConfig
 import ai.lotus.app.computer.ComputerToolContract
+import ai.lotus.app.computer.ComputerStatus
 import ai.lotus.app.computer.LinuxHubBridge
 import ai.lotus.app.shizuku.RootBridge
 import ai.lotus.app.shizuku.ShizukuBridge
@@ -12,6 +13,7 @@ import ai.lotus.app.data.Capabilities
 import ai.lotus.app.data.CapabilityStore
 import ai.lotus.app.data.ChatEvent
 import ai.lotus.app.data.ChatToolCall
+import ai.lotus.app.data.driveToolLoop
 import ai.lotus.app.data.ChatTurn
 import ai.lotus.app.data.Conversation
 import ai.lotus.app.data.AppPrefs
@@ -28,6 +30,7 @@ import ai.lotus.app.data.ProviderStore
 import ai.lotus.app.data.UpdateChecker
 import ai.lotus.app.data.Prompts
 import ai.lotus.app.data.SelectionStore
+import ai.lotus.app.data.ToolImageAttachment
 import ai.lotus.app.data.isOpeningLine
 import ai.lotus.app.data.openingLine
 import ai.lotus.app.ui.chat.ChatDisplay
@@ -63,8 +66,10 @@ import ai.lotus.app.ui.nav.LotusBottomBar
 import ai.lotus.app.ui.nav.LotusTab
 import ai.lotus.app.ui.settings.SettingsScreen
 import ai.lotus.app.ui.theme.LotusPalette
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.util.Base64
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -127,11 +132,13 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.util.UUID
 
 /** 输入条与底栏之间的间距。 */
@@ -149,6 +156,56 @@ private const val ContextSummaryPrompt =
 2. 丢掉寒暄、重复、语气词、和已经被推翻的中间过程；
 3. 按要点分组，短句为主，不要评论，不要续写，不要问问题；
 4. 用中文输出，总长控制在 400 字以内。"""
+
+private const val MaxToolImageBytes = 20 * 1024 * 1024
+
+/** 一次“完全访问”任意命令的审批请求。用户批准前工具循环暂停。 */
+private data class ShellApprovalPrompt(
+  val id: Long,
+  val command: String,
+  val backend: String,
+)
+
+/** 工具返回的 Base64 图片只在本地落盘，聊天里保存路径；模型上下文拿不到这坨大字符串。 */
+private fun persistToolImage(context: Context, image: ToolImageAttachment): String? {
+  val mime = image.mimeType.lowercase().substringBefore(';').trim()
+  val extension =
+    when (mime) {
+      "image/png" -> "png"
+      "image/jpeg", "image/jpg" -> "jpg"
+      "image/webp" -> "webp"
+      else -> return null
+    }
+  val encoded = image.base64.trim()
+  if (encoded.isBlank() || encoded.length > ((MaxToolImageBytes + 2L) / 3L) * 4L) return null
+  val bytes = runCatching { Base64.decode(encoded, Base64.DEFAULT) }.getOrNull() ?: return null
+  if (bytes.isEmpty() || bytes.size > MaxToolImageBytes) return null
+  val validMagic =
+    when (extension) {
+      "png" -> bytes.size >= 8 && bytes.copyOfRange(0, 8).contentEquals(byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A))
+      "jpg" -> bytes.size >= 3 && bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte() && bytes[2] == 0xFF.toByte()
+      "webp" -> bytes.size >= 12 && bytes.copyOfRange(0, 4).contentEquals("RIFF".toByteArray()) && bytes.copyOfRange(8, 12).contentEquals("WEBP".toByteArray())
+      else -> false
+    }
+  if (!validMagic) return null
+  val dir = File(context.filesDir, "tool_screenshots").apply { mkdirs() }
+  val target = File(dir, "screenshot-${System.currentTimeMillis()}.$extension")
+  val temp = File(dir, target.name + ".tmp")
+  return runCatching {
+      temp.writeBytes(bytes)
+      if (!temp.renameTo(target)) {
+        target.writeBytes(bytes)
+        temp.delete()
+      }
+      dir.listFiles()
+        ?.filter { it.isFile && it.name.startsWith("screenshot-") }
+        ?.sortedByDescending { it.lastModified() }
+        ?.drop(30)
+        ?.forEach { it.delete() }
+      target.absolutePath
+    }
+    .getOrNull()
+}
 
 // 思考档位与模型列表**不在这里**：它们来自 `ui/model/ModelCatalog.kt`。
 // 那一张表就是"思考模式跟着模型走"的唯一来源 —— 换模型会自动把档位夹进新模型的范围。
@@ -217,6 +274,7 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
   var historyOpen by remember { mutableStateOf(false) }
   // 右上角那枚玻璃钮开的面板：**上下文 + 会话动作合成一块**（用户：合并一下）。
   var chatPanelOpen by remember { mutableStateOf(false) }
+  var permissionDialogOpen by remember { mutableStateOf(false) }
   var renaming by remember { mutableStateOf(false) }
   var deleting by remember { mutableStateOf(false) }
   // 改名 / 归档这类静默操作也要给用户一个看得见的结果。
@@ -343,6 +401,21 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
   var changelogOpen by remember { mutableStateOf(false) }
   // 「工具」那一页（它都有哪些工具）。入口在聊天页右上角那块面板里。
   var toolsOpen by remember { mutableStateOf(false) }
+  var toolsComputerStatus by remember { mutableStateOf(ComputerStatus()) }
+  var toolsComputerChecking by remember { mutableStateOf(false) }
+
+  fun refreshToolsComputer() {
+    if (toolsComputerChecking) return
+    toolsComputerChecking = true
+    scope.launch {
+      toolsComputerStatus = LinuxHubBridge.status(context)
+      toolsComputerChecking = false
+    }
+  }
+
+  LaunchedEffect(toolsOpen) {
+    if (toolsOpen) refreshToolsComputer()
+  }
   // 应用内阅读器打开的是哪个页面（null = 关着）。
   var readerUrl by remember { mutableStateOf<String?>(null) }
   // 「来源」半屏列表：点消息底部的站点图标先开这个，再点具体一条才进阅读器。
@@ -440,6 +513,7 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
     composerMenu = false
     historyOpen = false
     chatPanelOpen = false
+    permissionDialogOpen = false
     // 「+」那张小菜单也要算浮层 —— 忘了它，点空白就关不掉（真出现过）。
     attachMenu = false
   }
@@ -627,6 +701,21 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
   var paintingId by remember { mutableStateOf<Long?>(null) }
   /** 正在流式回答的那条消息 id。用来控制思考玻璃自动出现 / 收起。 */
   var replyingId by remember { mutableStateOf<Long?>(null) }
+
+  // 完全访问：默认关闭；开启后模型可请求任意 shell，但每条命令都要在这里逐次批准。
+  var fullSystemAccess by remember { mutableStateOf(AppPrefs.fullSystemAccessEnabled(context)) }
+  var shellApprovalPrompt by remember { mutableStateOf<ShellApprovalPrompt?>(null) }
+  var shellApprovalSequence by remember { mutableStateOf(0L) }
+  val shellApprovalWaiters = remember { mutableMapOf<Long, CompletableDeferred<Boolean>>() }
+
+  fun updateFullSystemAccess(enabled: Boolean) {
+    fullSystemAccess = enabled
+    AppPrefs.setFullSystemAccessEnabled(context, enabled)
+    if (!enabled) {
+      shellApprovalPrompt?.let { prompt -> shellApprovalWaiters.remove(prompt.id)?.complete(false) }
+      shellApprovalPrompt = null
+    }
+  }
 
   // 「记住这段」——手动触发的记忆落盘（见 rememberConversation）。
   var rememberBusy by remember { mutableStateOf(false) }
@@ -841,6 +930,27 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
   }
 
   /**
+   * 暂停工具循环，等待用户批准一次任意命令。
+   *
+   * 这个函数只持有 UI 状态和一个 CompletableDeferred；拒绝、点遮罩或协程取消都不会执行命令。
+   * 不做“本次会话永久允许”，因为任意 shell 的影响面太大，必须每次看到具体命令再决定。
+   */
+  suspend fun requestShellApproval(command: String, backend: String): Boolean {
+    if (shellApprovalPrompt != null) return false
+    shellApprovalSequence += 1
+    val id = shellApprovalSequence
+    val decision = CompletableDeferred<Boolean>()
+    shellApprovalWaiters[id] = decision
+    shellApprovalPrompt = ShellApprovalPrompt(id = id, command = command, backend = backend)
+    return try {
+      decision.await()
+    } finally {
+      shellApprovalWaiters.remove(id)
+      if (shellApprovalPrompt?.id == id) shellApprovalPrompt = null
+    }
+  }
+
+  /**
    * 发一条，然后**真的去打模型**（流式）。
    *
    * 一次提问 = 一次调用，没有隐藏的额外请求：历史直接就是 `messages`，没有压缩、没有复盘。
@@ -899,10 +1009,12 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
     val androidToolsReady = ShizukuTools.ready()
     val computerToolsReady = LinuxHubBridge.ready()
     val functionToolsReady = androidToolsReady || computerToolsReady
+    val shellFullAccessEnabled = AppPrefs.fullSystemAccessEnabled(context)
     // 工具规则只在真实可用的后端已经验证通过时注入。
     val activePolicies =
       buildList {
         if (androidToolsReady) add(ShizukuTools.policy)
+        if (androidToolsReady && shellFullAccessEnabled) add(ShizukuTools.fullAccessPolicy)
         if (computerToolsReady) add(ComputerToolContract.policy)
       }
     val turns =
@@ -948,11 +1060,18 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
     // 聊天页那行「访问记录」就不会出现。**不拿正文里的链接冒充**。
     val sourceBuf = linkedSetOf<String>()
     val toolLogs = mutableListOf<String>()
-    var toolCallUsed = false
     var toolCallsThisRun: List<ChatToolCall> = emptyList()
     var toolRunSucceeded: Boolean? = null
+    var toolCallCount = 0
+    // 最后一次请求是否失败。工具执行成功 ≠ 最终回答成功；502 后绝不能借工具标记补“已完成”。
+    var lastStreamFailed = false
     var totalPromptTokens = 0
     var totalCompletionTokens = 0
+
+    fun publishToolProgress() {
+      val index = messages.indexOfFirst { it.id == replyId }
+      if (index >= 0) messages[index] = messages[index].copy(toolLog = toolLogs.toList())
+    }
 
     suspend fun runStream(
       attemptEffort: String?,
@@ -962,6 +1081,7 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
     ): Pair<Boolean, List<ChatToolCall>> {
       var gotText = false
       var failed = false
+      lastStreamFailed = false
       toolCallsThisRun = emptyList()
       // 重发时从头再来，别把上一次的残留标记接进这一轮。
       rawReply = ""
@@ -977,7 +1097,7 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
       val functionTools =
         if (allowFunctionTools) {
           buildList {
-            if (ShizukuTools.ready()) addAll(ShizukuTools.specs)
+            if (ShizukuTools.ready()) addAll(ShizukuTools.specs(shellFullAccessEnabled))
             if (LinuxHubBridge.ready()) addAll(ComputerToolContract.specs())
           }
         } else {
@@ -1036,11 +1156,12 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
               }
             }
             is ChatEvent.ToolCalls -> {
-              // 每轮最多接受一个工具调用。多个候选只取第一个，绝不形成 Agent 循环。
-              toolCallsThisRun = event.calls.take(1)
+              // OpenAI 兼容接口允许一次返回多个独立调用；有多少就接多少，不截断。
+              toolCallsThisRun = event.calls
             }
             is ChatEvent.Failed -> {
               failed = true
+              lastStreamFailed = true
               val old = messages[index].text
               val warning = "⚠️ ${event.message}"
               messages[index] =
@@ -1060,49 +1181,138 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
     }
 
     scope.launch {
-      var outcome = runStream(effort, turns, functionToolsReady, allowWebSearch = webSearch)
-      // 上游不接受 web_search 与 function tools 混用：先摘联网，保住 Shizuku/电脑工具。
+      val workingTurns = turns.toMutableList()
+      var outcome = runStream(effort, workingTurns, functionToolsReady, allowWebSearch = webSearch)
+
+      fun clearFailedText() {
+        val index = messages.indexOfFirst { it.id == replyId }
+        if (index >= 0) messages[index] = messages[index].copy(text = "")
+      }
+
+      // 兼容不同上游的参数拒绝顺序：始终优先保住工具；最后才降成纯聊天。
       if (outcome.first && functionToolsReady && webSearch) {
-        val index = messages.indexOfFirst { it.id == replyId }
-        if (index >= 0) messages[index] = messages[index].copy(text = "")
-        outcome = runStream(effort, turns, allowFunctionTools = true, allowWebSearch = false)
+        clearFailedText()
+        outcome = runStream(effort, workingTurns, allowFunctionTools = true, allowWebSearch = false)
       }
-      // 函数工具本身也不被接受：再退回只保留联网的纯聊天。
+      if (outcome.first && functionToolsReady && effort != null) {
+        clearFailedText()
+        outcome = runStream(null, workingTurns, allowFunctionTools = true, allowWebSearch = false)
+      }
       if (outcome.first && functionToolsReady) {
-        val index = messages.indexOfFirst { it.id == replyId }
-        if (index >= 0) messages[index] = messages[index].copy(text = "")
-        outcome = runStream(effort, turns, allowFunctionTools = false, allowWebSearch = webSearch)
+        clearFailedText()
+        outcome = runStream(null, workingTurns, allowFunctionTools = false, allowWebSearch = webSearch)
       }
-      // 思考档位也不被接受时，最后摘掉 reasoning_effort。
       if (outcome.first && effort != null) {
-        val index = messages.indexOfFirst { it.id == replyId }
-        if (index >= 0) messages[index] = messages[index].copy(text = "")
-        outcome = runStream(null, turns, allowFunctionTools = false, allowWebSearch = webSearch)
+        clearFailedText()
+        outcome = runStream(null, workingTurns, allowFunctionTools = false, allowWebSearch = webSearch)
       }
-      // 单次工具调用：执行一次 → 把结构化结果回填给同一轮模型 → 然后必须结束。
-      val call = outcome.second.firstOrNull()
-      if (call != null && !toolCallUsed) {
-        toolCallUsed = true
+      if (outcome.first && webSearch) {
+        clearFailedText()
+        outcome = runStream(null, workingTurns, allowFunctionTools = false, allowWebSearch = false)
+      }
+
+      suspend fun executeToolCall(call: ChatToolCall): String {
+        val computerTool = ComputerToolContract.isComputerTool(call.name)
+        val shellTool = !computerTool && ShizukuTools.isShellExecution(call)
+        if (shellTool && !fullSystemAccess) {
+          toolCallCount += 1
+          toolRunSucceeded = false
+          toolLogs += "系统工具｜受限模式已阻止完全访问命令"
+          val index = messages.indexOfFirst { it.id == replyId }
+          if (index >= 0) {
+            messages[index] = messages[index].copy(reasoning = "", toolLog = toolLogs.toList())
+          }
+          return "{\"ok\":false,\"error\":\"完全访问未开启，命令未执行\"}"
+        }
+        var shellApproved = false
+        if (shellTool) {
+          val command = ShizukuTools.shellCommand(call)
+          val backend = ShizukuTools.shellBackendLabel()
+          val needsApproval = backend != null && command.isNotBlank() && command.length <= 32_768
+          if (needsApproval) {
+            val waiting =
+              "系统工具｜等待审批 · $backend · " +
+                command.lineSequence().firstOrNull().orEmpty().take(90)
+            toolLogs += waiting
+            publishToolProgress()
+            val approved = requestShellApproval(command, backend.orEmpty())
+            if (toolLogs.lastOrNull() == waiting) toolLogs.removeAt(toolLogs.lastIndex)
+            if (!approved) {
+              toolCallCount += 1
+              toolRunSucceeded = false
+              toolLogs += "系统工具｜用户拒绝了完全访问命令"
+              val index = messages.indexOfFirst { it.id == replyId }
+              if (index >= 0) {
+                messages[index] =
+                  messages[index].copy(reasoning = "", toolLog = toolLogs.toList())
+              }
+              return "{\"ok\":false,\"error\":\"用户拒绝了完全访问命令，命令未执行\"}"
+            }
+            shellApproved = true
+          } else if (backend != null) {
+            // 空命令或超长命令不会进入审批，也不会执行；交给后端返回准确错误。
+            shellApproved = true
+          }
+        }
+        val runningLog = "${if (computerTool) "LinuxHub" else "系统工具"}｜正在调用 ${call.name}…"
+        toolLogs += runningLog
+        publishToolProgress()
         val toolResult =
-          if (ComputerToolContract.isComputerTool(call.name)) {
+          if (computerTool) {
             ComputerToolContract.execute(context, call)
           } else {
-            ShizukuTools.execute(call)
+            ShizukuTools.execute(call, shellApproved = shellApproved)
           }
-        toolRunSucceeded = toolResult.ok
+        if (toolLogs.lastOrNull() == runningLog) toolLogs.removeAt(toolLogs.lastIndex)
+        val imagePath = toolResult.image?.let { persistToolImage(context, it) }
+        val imageSaved = toolResult.image == null || imagePath != null
+        val callSucceeded = toolResult.ok && imageSaved
+        toolCallCount += 1
+        toolRunSucceeded =
+          if (toolCallCount == 1) callSucceeded else toolRunSucceeded == true && callSucceeded
         toolLogs += toolResult.log
+        if (!imageSaved) toolLogs += "LinuxHub｜${toolResult.image.label}写入失败"
         val index = messages.indexOfFirst { it.id == replyId }
-        if (index >= 0) messages[index] = messages[index].copy(text = "", reasoning = "")
-        val toolTurns =
-          turns +
-            ChatTurn(role = "assistant", content = "", toolCalls = listOf(call)) +
-            ChatTurn(role = "tool", content = toolResult.payload, toolCallId = call.id)
-        outcome = runStream(effort, toolTurns, allowFunctionTools = false)
-        if (outcome.first && effort != null) {
-          val i = messages.indexOfFirst { it.id == replyId }
-          if (i >= 0) messages[i] = messages[i].copy(text = "", reasoning = "")
-          outcome = runStream(null, toolTurns, allowFunctionTools = false)
+        if (index >= 0) {
+          val existing = messages[index].displayImagePaths
+          val failureText =
+            when {
+              callSucceeded -> messages[index].text
+              call.name.endsWith("desktop_screenshot") ->
+                "⚠️ 桌面截图失败：${toolResult.error ?: "工具没有返回画面"}"
+              call.name.endsWith("android_screenshot") ->
+                "⚠️ 安卓截图失败：${toolResult.error ?: "工具没有返回画面"}"
+              else -> messages[index].text
+            }
+          messages[index] =
+            messages[index].copy(
+              text = failureText,
+              reasoning = "",
+              imagePath = imagePath ?: messages[index].imagePath,
+              imagePaths = if (imagePath != null) (existing + imagePath).distinct() else existing,
+              toolLog = toolLogs.toList(),
+            )
         }
+        return toolResult.payload
+      }
+
+      // 多步工具循环：执行模型这一轮要的全部调用 → 回填结果 → 继续观察并调用。
+      // 不设客户端轮数或次数上限，直到模型不再请求工具、请求失败或协程被取消。
+      driveToolLoop(outcome.second) { calls ->
+        val payloads = calls.map { executeToolCall(it) }
+        workingTurns += ChatTurn(role = "assistant", content = "", toolCalls = calls)
+        calls.zip(payloads).forEach { (call, payload) ->
+          workingTurns += ChatTurn(role = "tool", content = payload, toolCallId = call.id)
+        }
+        val i = messages.indexOfFirst { it.id == replyId }
+        if (i >= 0) messages[i] = messages[i].copy(reasoning = "")
+        outcome = runStream(effort, workingTurns, allowFunctionTools = true, allowWebSearch = false)
+        if (outcome.first && effort != null) {
+          val retryIndex = messages.indexOfFirst { it.id == replyId }
+          if (retryIndex >= 0) messages[retryIndex] = messages[retryIndex].copy(text = "", reasoning = "")
+          outcome = runStream(null, workingTurns, allowFunctionTools = true, allowWebSearch = false)
+        }
+        outcome.second
       }
       // 模型自己记下的东西 → 按语义分开落盘。用户手写的内容永远不动。
       val memoryFiles = linkedSetOf<String>()
@@ -1185,6 +1395,7 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
           if (archived.isNotEmpty()) add("归档")
           if (tidied) add("整理")
           if (webSearch) add("联网")
+          if (toolLogs.any { it.contains("截图") }) add("截图")
           if (toolLogs.any { it.startsWith("LinuxHub｜") }) add("电脑")
           if (toolLogs.any { !it.startsWith("LinuxHub｜") }) add("系统工具")
           if (didImage) add("生图")
@@ -1224,11 +1435,13 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
         val currentText = messages[ti].text.trim()
         val completedText =
           when {
-            toolRunSucceeded == true &&
+            !lastStreamFailed &&
+              toolRunSucceeded == true &&
               currentText.isNotBlank() &&
               !currentText.startsWith("已完成") &&
               !currentText.startsWith("完成") -> "已完成：\n$currentText"
-            toolRunSucceeded == false &&
+            !lastStreamFailed &&
+              toolRunSucceeded == false &&
               currentText.isNotBlank() &&
               !currentText.startsWith("未完成") &&
               !currentText.startsWith("失败") -> "未完成：\n$currentText"
@@ -1471,6 +1684,8 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
               onConnectRoot = { RootBridge.connectNow() },
               shizukuState = shizukuState,
               onConnectShizuku = { ShizukuBridge.connectNow() },
+              fullSystemAccess = fullSystemAccess,
+              onFullSystemAccessChange = { enabled -> updateFullSystemAccess(enabled) },
               bottomInset = bottomInset,
             )
         }
@@ -1555,16 +1770,23 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
               onRename = { chatPanelOpen = false; renaming = true },
               onDelete = { chatPanelOpen = false; deleting = true },
               onTools = { chatPanelOpen = false; toolsOpen = true },
+              fullSystemAccess = fullSystemAccess,
+              onPermission = { chatPanelOpen = false; permissionDialogOpen = true },
               // 行尾小字只报"配好的外围能力有几项"，不假报常开的那些。
               toolsHint =
-                listOf(
-                    capabilities.ready(ai.lotus.app.data.CapabilityKind.Image),
-                    capabilities.ready(ai.lotus.app.data.CapabilityKind.Video),
-                    capabilities.ready(ai.lotus.app.data.CapabilityKind.Search),
-                    capabilities.ready(ai.lotus.app.data.CapabilityKind.Ocr),
-                  )
-                  .count { it }
-                  .let { "$it/4 已配" },
+                buildString {
+                  val configured =
+                    listOf(
+                        capabilities.ready(ai.lotus.app.data.CapabilityKind.Image),
+                        capabilities.ready(ai.lotus.app.data.CapabilityKind.Video),
+                        capabilities.ready(ai.lotus.app.data.CapabilityKind.Search),
+                        capabilities.ready(ai.lotus.app.data.CapabilityKind.Ocr),
+                      )
+                      .count { it }
+                  append("$configured/4 已配")
+                  val computerTools = LinuxHubBridge.tools().size
+                  if (computerTools > 0) append(" · 电脑 $computerTools")
+                },
               modifier = Modifier.align(Alignment.TopEnd).padding(end = 14.dp, top = 62.dp),
             )
           }
@@ -1834,6 +2056,9 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
               onConnectRoot = { RootBridge.connectNow() },
               shizukuState = shizukuState,
               onConnectShizuku = { ShizukuBridge.connectNow() },
+              computerStatus = toolsComputerStatus,
+              computerChecking = toolsComputerChecking,
+              onRefreshComputer = { refreshToolsComputer() },
               onDismiss = { toolsOpen = false },
             )
           }
@@ -1894,6 +2119,48 @@ fun LotusApp(onHomeArtBounds: (Rect) -> Unit = {}) {
                 dismissUpdate()
               },
               onDismiss = { dismissUpdate() },
+            )
+          }
+
+          // ⓪-5 「权限」也放在聊天右上角面板里，避免只能钻进设置深处才能找到。
+          if (permissionDialogOpen) {
+            GlassConfirmDialog(
+              title = "系统工具权限",
+              body =
+                if (fullSystemAccess) {
+                  "当前为完全访问：模型可以请求任意 shell，每条命令仍会暂停并展示完整内容，等你逐次批准。切回受限后，模型只能使用固定工具。"
+                } else {
+                  "当前为受限模式：只开放系统诊断和固定工具，不接收任意 shell。开启完全访问后，模型可以请求任意命令，但每条命令都必须先由你逐次批准。"
+                },
+              confirmLabel = if (fullSystemAccess) "切回受限" else "开启完全访问",
+              onConfirm = {
+                updateFullSystemAccess(!fullSystemAccess)
+                permissionDialogOpen = false
+              },
+              onDismiss = { permissionDialogOpen = false },
+            )
+          }
+
+          // ⓪-6 「完全访问」任意命令的逐次审批。放最后，保证盖在所有页面和弹层上面。
+          shellApprovalPrompt?.let { prompt ->
+            GlassConfirmDialog(
+              title = "允许执行完全访问命令？",
+              body =
+                buildString {
+                  append("后端：").append(prompt.backend).append("\n\n")
+                  append(prompt.command).append("\n\n")
+                  append("只批准这一次。拒绝、点遮罩或离开本页都不会执行。")
+                },
+              confirmLabel = "允许一次",
+              scrollableBody = true,
+              onConfirm = {
+                shellApprovalWaiters.remove(prompt.id)?.complete(true)
+                shellApprovalPrompt = null
+              },
+              onDismiss = {
+                shellApprovalWaiters.remove(prompt.id)?.complete(false)
+                shellApprovalPrompt = null
+              },
             )
           }
         }

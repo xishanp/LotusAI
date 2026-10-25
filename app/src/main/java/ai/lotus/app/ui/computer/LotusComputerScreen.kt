@@ -2,6 +2,7 @@ package ai.lotus.app.ui.computer
 
 import ai.lotus.app.computer.ComputerCommandResult
 import ai.lotus.app.data.AppPrefs
+import ai.lotus.app.data.ProjectLinks
 import ai.lotus.app.computer.ComputerPhase
 import ai.lotus.app.computer.ComputerStatus
 import ai.lotus.app.computer.LinuxHubBridge
@@ -433,14 +434,14 @@ fun LotusComputerScreen(bottomInset: Dp, onBack: () -> Unit) {
     )
     SettingsGroup(enter = 3) {
       SettingsRow(
-        title = "LinuxHub 仓库",
-        value = "xishanp/LotusAI",
+        title = "LinuxHub 原项目",
+        value = ProjectLinks.DoroUbuntuRepo,
         icon = LotusGlyph.Globe,
         onClick = {
           runCatching {
             context.startActivity(
               Intent(Intent.ACTION_VIEW).apply {
-                data = Uri.parse("https://github.com/xishanp/LotusAI")
+                data = Uri.parse(ProjectLinks.DoroUbuntuUrl)
               }
             )
           }

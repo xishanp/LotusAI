@@ -3,6 +3,7 @@ package ai.lotus.app.computer
 import ai.lotus.app.data.AppPrefs
 import ai.lotus.app.data.ChatToolCall
 import ai.lotus.app.data.ChatToolSpec
+import ai.lotus.app.data.ToolImageAttachment
 import ai.lotus.app.data.ToolRunResult
 import android.content.Context
 import java.util.concurrent.atomic.AtomicBoolean
@@ -341,10 +342,12 @@ object ComputerToolContract {
         - 必须使用模型工具名 lotus_computer_*；不要直接输出 LinuxHub 的原始 API 名。
         - 不要在未调用工具时声称命令已经执行。
         - 无头桌面启动后要先用 lotus_computer_desktop_status 确认，再操作鼠标、键盘或截图。
-        - 桌面截图返回 PNG Base64；除非用户需要查看画面，否则不要调用。
+        - 桌面截图和安卓截图会由客户端直接显示为聊天气泡里的图片；工具结果只包含摘要。
+        - 用户要求查看桌面或手机画面时可以截图；不要声称自己“看到了”未由工具返回的内容。
         - 命令输出、退出码、耗时和错误必须来自工具结果，禁止编造。
         - 工具失败时说“未完成”并原样说明原因；成功时第一句用“已完成：”。
-        - 工具结果回填后直接回答，不再连续调用。
+        - 可以连续调用多个工具：每次观察工具结果后再决定下一步。需要“启动桌面 → 查状态 → 截图”时就按顺序做完。
+        - 互不依赖的读取可以放在同一批调用里；任务完成或失败原因已明确后停止调用并回答。
         当前可用工具：
         $available
       """.trimIndent()
@@ -381,18 +384,27 @@ object ComputerToolContract {
           ?: arguments["timeout_ms"]?.jsonPrimitive?.longOrNull
       }.getOrNull()?.coerceIn(1_000L, 300_000L) ?: 60_000L
     val run = LinuxHubBridge.callTool(context, tool.apiName, arguments, timeout)
-    val detail = toolDetail(tool.apiName, arguments, run)
+    val image = if (run.ok) screenshotImage(tool.apiName, run) else null
+    val payload = if (image != null) payloadWithoutImage(run) else run.payload
+    val detail = toolDetail(tool.apiName, arguments, run, image != null)
     return ToolRunResult(
       ok = run.ok,
-      payload = run.payload,
+      payload = payload,
       elapsedMs = run.elapsedMs,
       log = "LinuxHub｜$detail · ${run.elapsedMs}ms" + if (run.ok) "" else " · 失败",
       displayName = call.name,
       backend = "LinuxHub",
+      error = run.error,
+      image = image,
     )
   }
 
-  private fun toolDetail(apiName: String, arguments: JsonObject, run: ComputerToolCallResult): String =
+  private fun toolDetail(
+    apiName: String,
+    arguments: JsonObject,
+    run: ComputerToolCallResult,
+    imageAttached: Boolean,
+  ): String =
     when (apiName) {
       "terminal.exec" ->
         "终端 · " + arguments.string("command").lineSequence().firstOrNull().orEmpty().take(90)
@@ -402,16 +414,66 @@ object ComputerToolContract {
       "desktop.status" -> "桌面状态"
       "desktop.screenshot" -> {
         val bytes = run.result?.get("bytes")?.jsonPrimitive?.intOrNull
-        "桌面截图" + (bytes?.let { " · ${it / 1024} KB" }.orEmpty())
+        "桌面截图" +
+          (bytes?.let { " · ${it / 1024} KB" }.orEmpty()) +
+          if (imageAttached) " · 已加入聊天" else ""
       }
       "desktop.input" -> "鼠标 · ${arguments.string("action").ifBlank { "input" }}"
       "desktop.key" -> "按键 · ${arguments.string("key")}"
       "desktop.text" -> "输入文字 · ${arguments.string("text").take(40)}"
       "desktop.launch_app" -> "启动应用 · ${arguments.string("desktopFile")}"
+      "android.screenshot" -> "安卓截图" + if (imageAttached) " · 已加入聊天" else ""
+      "android.shell" ->
+        "Android 命令 · " + arguments.string("command").lineSequence().firstOrNull().orEmpty().take(70)
+      "android.input" -> "Android 操作 · ${arguments.string("action").ifBlank { "input" }}"
+      "android.install" -> "安装 APK · ${arguments.string("containerPath")}"
+      "android.uninstall" -> "卸载应用 · ${arguments.string("packageName")}"
+      "android.host_status" -> "Android 主机状态"
       "android.shizuku_status" -> "Shizuku 状态"
       "system.info" -> "系统信息"
       else -> apiName
     }
+
+  private fun screenshotImage(apiName: String, run: ComputerToolCallResult): ToolImageAttachment? {
+    if (apiName != "desktop.screenshot" && apiName != "android.screenshot") return null
+    val result = run.result ?: return null
+    val base64 = result.string("imageBase64").trim()
+    if (base64.isBlank()) return null
+    return ToolImageAttachment(
+      base64 = base64,
+      mimeType = result.string("mimeType").ifBlank { "image/png" },
+      width = result["width"]?.jsonPrimitive?.intOrNull,
+      height = result["height"]?.jsonPrimitive?.intOrNull,
+      label = if (apiName == "desktop.screenshot") "桌面截图" else "安卓截图",
+    )
+  }
+
+  /** Base64 只给 UI 落成文件；模型只拿不带大字段的 JSON，否则上下文会被一张图直接撑爆。 */
+  private fun payloadWithoutImage(run: ComputerToolCallResult): String {
+    val root = runCatching { json.parseToJsonElement(run.payload).jsonObject }.getOrNull()
+      ?: return """{"ok":true,"imageAttachedToChat":true}"""
+    val result = root["result"] as? JsonObject
+    return buildJsonObject {
+        root.forEach { (key, value) ->
+          if (key != "imageBase64") put(key, value)
+        }
+        if (result != null) {
+          put(
+            "result",
+            buildJsonObject {
+              result.forEach { (key, value) ->
+                if (key != "imageBase64") put(key, value)
+              }
+              put("imageAttachedToChat", true)
+              put("note", "截图已直接显示在聊天界面；无需读取 Base64")
+            },
+          )
+        } else {
+          put("imageAttachedToChat", true)
+        }
+      }
+      .toString()
+  }
 
   private fun JsonObject.string(key: String): String =
     (this[key] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull.orEmpty()

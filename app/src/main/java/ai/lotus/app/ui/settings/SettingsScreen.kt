@@ -20,6 +20,7 @@ import ai.lotus.app.data.ModelCapabilityStore
 import ai.lotus.app.data.ModelIdentityStatus
 import ai.lotus.app.data.probeModelCapabilities
 import ai.lotus.app.data.Prompts
+import ai.lotus.app.data.ProjectLinks
 import ai.lotus.app.data.UpdateChecker
 import ai.lotus.app.data.Probe
 import ai.lotus.app.data.DefaultContextWindow
@@ -197,6 +198,9 @@ fun SettingsScreen(
   /** Shizuku 兼容后端。页面只读取；授权只能由用户点按钮触发。 */
   shizukuState: ShizukuState = ShizukuState(),
   onConnectShizuku: () -> Unit = {},
+  /** 完全访问 = 模型可请求任意 shell，但每条命令仍需逐次审批。 */
+  fullSystemAccess: Boolean = false,
+  onFullSystemAccessChange: (Boolean) -> Unit = {},
   bottomInset: Dp,
 ) {
   var page by remember { mutableStateOf(SettingsPage.Index) }
@@ -385,6 +389,8 @@ fun SettingsScreen(
         bottomInset = bottomInset,
         onConnectRoot = onConnectRoot,
         onConnectShizuku = onConnectShizuku,
+        fullSystemAccess = fullSystemAccess,
+        onFullSystemAccessChange = onFullSystemAccessChange,
         onBack = back,
       )
     SettingsPage.Computer -> LotusComputerScreen(bottomInset = bottomInset, onBack = back)
@@ -1803,6 +1809,8 @@ private fun SystemToolsPane(
   bottomInset: Dp,
   onConnectRoot: () -> Unit,
   onConnectShizuku: () -> Unit,
+  fullSystemAccess: Boolean,
+  onFullSystemAccessChange: (Boolean) -> Unit,
   onBack: () -> Unit,
 ) {
   val rootLabel = rootServiceLabel(rootState)
@@ -1839,6 +1847,13 @@ private fun SystemToolsPane(
       SettingsRow("Shizuku 服务", shizukuLabel, chevron = false, onClick = {})
       Hairline()
       SettingsRow("Shizuku 身份", shizukuIdentity, chevron = false, onClick = {})
+      Hairline()
+      SettingsRow(
+        "命令权限",
+        if (fullSystemAccess) "完全访问 · 逐次审批" else "受限 · 固定工具",
+        chevron = true,
+        onClick = { onFullSystemAccessChange(!fullSystemAccess) },
+      )
     }
     if (rootState.phase == RootPhase.Denied || rootState.phase == RootPhase.Error) {
       Spacer(Modifier.height(10.dp))
@@ -1852,7 +1867,11 @@ private fun SystemToolsPane(
     }
     Spacer(Modifier.height(14.dp))
     Text(
-      "系统工具只开放固定白名单；每轮最多调用一次。冻结/解冻仅允许非关键系统应用，关键应用会被客户端直接拒绝。",
+      if (fullSystemAccess) {
+        "完全访问已开启：模型可以请求任意 shell，但执行前会暂停，并把完整命令交给你逐次批准。拒绝、点遮罩或离开本页都不会执行。"
+      } else {
+        "当前为受限模式：只开放系统诊断和固定白名单，可读内存、CPU、存储、电池、网络、进程和温度；不会声明任意 shell 工具。"
+      },
       style = MaterialTheme.typography.bodySmall,
       color = LotusPalette.InkFaint,
       lineHeight = 18.sp,
@@ -1918,16 +1937,44 @@ private fun AboutPane(
         // 「关于」的下面这一位：版本日志（独立一页，新旧版本都在）。
         SettingsRow("版本日志", "v$AppVersion", onClick = onOpenChangelog)
         Hairline()
-        // 用户口径：「我的机器上有我的 GitHub 账号，你自己找找，找到之后添加上」——
-        // 机器上 gh 的登录用户 = xishanp（戏山），已核对 GitHub API。
         SettingsRow(
-          "作者 GitHub",
-          "xishanp",
+          "签名分发仓库",
+          ProjectLinks.LotusDistributionRepo,
           chevron = true,
           onClick = {
             runCatching {
               context.startActivity(
-                Intent(Intent.ACTION_VIEW).apply { data = Uri.parse("https://github.com/xishanp") }
+                Intent(Intent.ACTION_VIEW).apply {
+                  data = Uri.parse(ProjectLinks.LotusDistributionUrl)
+                }
+              )
+            }
+          },
+        )
+        Hairline()
+        SettingsRow(
+          "LinuxHub 原项目",
+          ProjectLinks.DoroUbuntuRepo,
+          chevron = true,
+          onClick = {
+            runCatching {
+              context.startActivity(
+                Intent(Intent.ACTION_VIEW).apply { data = Uri.parse(ProjectLinks.DoroUbuntuUrl) }
+              )
+            }
+          },
+        )
+        Hairline()
+        // 用户口径：「我的机器上有我的 GitHub 账号，你自己找找，找到之后添加上」——
+        // 机器上 gh 的登录用户 = xishanp（戏山），已核对 GitHub API。
+        SettingsRow(
+          "作者 GitHub",
+          ProjectLinks.AuthorGitHub,
+          chevron = true,
+          onClick = {
+            runCatching {
+              context.startActivity(
+                Intent(Intent.ACTION_VIEW).apply { data = Uri.parse(ProjectLinks.AuthorGitHubUrl) }
               )
             }
           },

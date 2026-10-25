@@ -23,6 +23,7 @@ object AppPrefs {
   private const val KeyShowChars = "showChars"
   private const val KeyOnboardingCompleted = "onboardingCompleted"
   private const val KeyLinuxHubToken = "linuxHubToken"
+  private const val KeyFullSystemAccess = "fullSystemAccess"
 
   /** 助手显示名。空 = 用户清空了输入框，显示时回退到 [DefaultAssistantName]。 */
   fun assistantName(context: Context): String =
@@ -56,6 +57,19 @@ object AppPrefs {
 
   fun setLinuxHubToken(context: Context, value: String) {
     prefs(context).edit().putString(KeyLinuxHubToken, value.trim()).apply()
+  }
+
+  /**
+   * 系统命令的「完全访问」等级。
+   *
+   * 开启后模型才会看到 system_shell_exec；但每个命令仍必须在界面上逐次得到用户批准。
+   * 默认关闭，避免任何模型在用户没看过命令时静默执行任意 shell。
+   */
+  fun fullSystemAccessEnabled(context: Context): Boolean =
+    prefs(context).getBoolean(KeyFullSystemAccess, false)
+
+  fun setFullSystemAccessEnabled(context: Context, value: Boolean) {
+    prefs(context).edit().putBoolean(KeyFullSystemAccess, value).apply()
   }
 
   // ---- 提示词 / 记忆：开不开、带多少 ----

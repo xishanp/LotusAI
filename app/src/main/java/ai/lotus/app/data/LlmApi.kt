@@ -18,6 +18,9 @@ import kotlinx.serialization.json.put
 import java.net.HttpURLConnection
 import java.net.URL
 
+private const val MaxErrorBodyChars = 32_768
+private val ErrorJson = Json { ignoreUnknownKeys = true }
+
 /** 一次连接测试的结果。 */
 sealed interface Probe {
   data class Ok(val models: List<String>) : Probe
@@ -61,13 +64,14 @@ object LlmApi {
       }
       val code = conn.responseCode
       val body =
-        (if (code in 200..299) conn.inputStream else conn.errorStream)
-          ?.bufferedReader()
-          ?.use { it.readText() }
-          .orEmpty()
+        if (code in 200..299) {
+          conn.inputStream.bufferedReader().use { it.readText() }
+        } else {
+          readErrorBody(conn)
+        }
 
       if (code !in 200..299) {
-        return@withContext Probe.Err("HTTP $code：${body.take(220).ifBlank { "（无内容）" }}")
+        return@withContext Probe.Err(upstreamHttpError(code, conn.contentType, body))
       }
 
       val ids = parseModelIds(body)
@@ -168,7 +172,7 @@ sealed interface ChatEvent {
    */
   data class Sources(val urls: List<String>) : ChatEvent
 
-  /** 模型请求调用客户端工具。调用方最多执行一次，不应形成工具循环。 */
+  /** 模型请求调用客户端工具。调用方逐项执行并回填，随后允许模型继续决策。 */
   data class ToolCalls(val calls: List<ChatToolCall>) : ChatEvent
 
   /** 失败，带一句能直接给用户看的原因。 */
@@ -297,8 +301,7 @@ fun LlmApi.chatStream(
         if (reasoningEffort != null) put("reasoning_effort", JsonPrimitive(reasoningEffort))
         if (maxTokens != null) put("max_tokens", JsonPrimitive(maxTokens))
         // 联网搜索：只加一个声明，真正的搜索和抓取都在上游做。
-        // 注意是 `{"type":"web_search"}`（原生搜索），不是自定义 function ——
-        // 后者会让模型回一个 tool_call 交给客户端执行，那就变成 Agent 循环了，正是要避开的。
+        // 原生搜索和客户端 function tools 可以同时声明；后者由 Lotus 执行并逐轮回填。
         val toolDeclarations =
           buildList {
             if (webSearch) {
@@ -343,8 +346,8 @@ fun LlmApi.chatStream(
 
     val code = conn.responseCode
     if (code !in 200..299) {
-      val err = conn.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
-      emit(ChatEvent.Failed("HTTP $code：${err.take(220).ifBlank { "（无内容）" }}"))
+      val err = readErrorBody(conn)
+      emit(ChatEvent.Failed(upstreamHttpError(code, conn.contentType, err)))
       return@flow
     }
 
@@ -381,7 +384,7 @@ fun LlmApi.chatStream(
       }
     }
     if (serverStreamError.isNotBlank()) {
-      emit(ChatEvent.Failed("上游流错误：${serverStreamError.take(220)}"))
+      emit(ChatEvent.Failed("上游流错误：${friendlyErrorText(serverStreamError, 180)}"))
       return@flow
     }
     if (!sawDone && lastFinishReason.isBlank()) {
@@ -421,6 +424,134 @@ private data class PendingToolCall(
       arguments = arguments.toString().ifBlank { "{}" },
     )
   }
+}
+
+/** 非 2xx 的错误体只读到有界长度，避免故障网关把整页 HTML 灌进内存和聊天正文。 */
+private fun readErrorBody(conn: HttpURLConnection): String =
+  runCatching {
+      conn.errorStream?.bufferedReader()?.use { reader ->
+        val out = StringBuilder()
+        val buffer = CharArray(4_096)
+        while (out.length < MaxErrorBodyChars) {
+          val count = reader.read(buffer, 0, minOf(buffer.size, MaxErrorBodyChars - out.length))
+          if (count <= 0) break
+          out.append(buffer, 0, count)
+        }
+        out.toString()
+      }.orEmpty()
+    }
+    .getOrDefault("")
+
+/**
+ * 把上游 HTTP 错误压成用户能读的一行。
+ *
+ * 中转站/gateway 故障时经常回整页 HTML。聊天正文绝不能显示整页标签；这里只保留状态码、常见
+ * 原因、HTML title 和 Cloudflare Ray ID（有就带，便于排查），其余内容全部丢弃。
+ */
+internal fun upstreamHttpError(code: Int, contentType: String?, body: String): String {
+  val type = contentType.orEmpty().lowercase()
+  val trimmed = body.trimStart()
+  val looksHtml =
+    "text/html" in type ||
+      "application/xhtml" in type ||
+      trimmed.startsWith("<!doctype", ignoreCase = true) ||
+      trimmed.startsWith("<html", ignoreCase = true) ||
+      "<title" in trimmed.take(2_000).lowercase()
+
+  if (looksHtml) {
+    val title =
+      runCatching {
+          Regex("<title[^>]*>(.*?)</title>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+            .find(body)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.replace(Regex("\\s+"), " ")
+            ?.trim()
+            ?.take(80)
+            ?.takeIf { it.isNotBlank() && !it.equals("error", ignoreCase = true) }
+        }
+        .getOrNull()
+    val ray =
+      runCatching {
+          Regex("Ray ID:\\s*(?:</?[^>]+>\\s*)*([0-9a-f]{8,})", RegexOption.IGNORE_CASE)
+            .find(body)
+            ?.groupValues
+            ?.getOrNull(1)
+        }
+        .getOrNull()
+    return buildString {
+      append(httpStatusReason(code))
+      title?.let { append("（").append(it).append("）") }
+      ray?.let { append(" · Ray ID ").append(it) }
+    }
+  }
+
+  val jsonMessage = jsonErrorMessage(body)
+  return if (jsonMessage.isNullOrBlank()) {
+    if (body.isBlank()) httpStatusReason(code) else "${httpStatusReason(code)}：${friendlyErrorText(body, 160)}"
+  } else {
+    "${httpStatusReason(code)}：${friendlyErrorText(jsonMessage, 160)}"
+  }
+}
+
+private fun httpStatusReason(code: Int): String =
+  when (code) {
+    400 -> "上游拒绝了请求（HTTP 400）"
+    401 -> "API Key 无效或未授权（HTTP 401）"
+    402 -> "账户余额不足（HTTP 402）"
+    403 -> "上游拒绝访问（HTTP 403）"
+    404 -> "接口或模型不存在（HTTP 404）"
+    408 -> "上游请求超时（HTTP 408）"
+    409 -> "上游请求冲突（HTTP 409）"
+    413 -> "请求内容过大（HTTP 413）"
+    415 -> "上游不支持这种请求格式（HTTP 415）"
+    422 -> "上游无法处理这次请求（HTTP 422）"
+    429 -> "请求过于频繁或额度已用完（HTTP 429）"
+    500 -> "上游服务内部错误（HTTP 500）"
+    502 -> "上游网关 502，服务暂不可用"
+    503 -> "上游服务暂不可用（HTTP 503）"
+    504 -> "上游网关超时（HTTP 504）"
+    else -> "上游请求失败（HTTP $code）"
+  }
+
+private fun jsonErrorMessage(body: String): String? =
+  runCatching {
+      val root = ErrorJson.parseToJsonElement(body).jsonObject
+      val error = root["error"]
+      when (error) {
+        is JsonPrimitive -> error.contentOrNull
+        is JsonObject ->
+          (error["message"] as? JsonPrimitive)?.contentOrNull
+            ?: (error["detail"] as? JsonPrimitive)?.contentOrNull
+            ?: (error["code"] as? JsonPrimitive)?.contentOrNull
+        else ->
+          (root["message"] as? JsonPrimitive)?.contentOrNull
+            ?: (root["detail"] as? JsonPrimitive)?.contentOrNull
+      }?.takeIf { it.isNotBlank() }
+    }
+    .getOrNull()
+
+/** 防止异常文本里混入 HTML；多行错误也只展示一行。 */
+private fun friendlyErrorText(raw: String, maxChars: Int): String {
+  val text = raw.trim()
+  if (text.isBlank()) return "（无错误详情）"
+  val withoutTags =
+    if (text.startsWith("<") || "<html" in text.take(2_000).lowercase() || "<!doctype" in text.take(2_000).lowercase()) {
+      Regex("<title[^>]*>(.*?)</title>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+        .find(text)
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.trim()
+        .orEmpty()
+        .ifBlank { "HTML 错误响应" }
+    } else {
+      text
+    }
+  return withoutTags
+    .replace(Regex("\\s+"), " ")
+    .trim()
+    .take(maxChars)
+    .ifBlank { "（无错误详情）" }
 }
 
 /**

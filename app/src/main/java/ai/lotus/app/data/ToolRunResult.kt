@@ -12,4 +12,15 @@ data class ToolRunResult(
   val log: String,
   val displayName: String,
   val backend: String,
+  val error: String? = null,
+  /** 工具产生的图片先留在内存里，由聊天层落盘并挂到当前回答；绝不把 Base64 塞回模型上下文。 */
+  val image: ToolImageAttachment? = null,
+)
+
+data class ToolImageAttachment(
+  val base64: String,
+  val mimeType: String = "image/png",
+  val width: Int? = null,
+  val height: Int? = null,
+  val label: String = "截图",
 )

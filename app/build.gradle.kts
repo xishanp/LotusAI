@@ -130,4 +130,6 @@ dependencies {
   // Shizuku 只负责把 Binder 以 shell/root 身份转发；真正的工具白名单在 UserService 内。
   implementation(libs.shizuku.api)
   implementation(libs.shizuku.provider)
+
+  testImplementation("junit:junit:4.13.2")
 }

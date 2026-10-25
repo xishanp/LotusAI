@@ -20,7 +20,7 @@ import kotlinx.serialization.json.contentOrNull
  */
 object UpdateChecker {
   /** 更新源仓库。改这里 = 改更新源。 */
-  const val Repo = "xishanp/LotusAI"
+  const val Repo = ProjectLinks.LotusDistributionRepo
 
   sealed interface Result {
     /** 有更新的版本。 */

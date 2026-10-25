@@ -1,5 +1,7 @@
 package ai.lotus.app.ui.home
 
+import ai.lotus.app.computer.ComputerPhase
+import ai.lotus.app.computer.ComputerStatus
 import ai.lotus.app.shizuku.RootPhase
 import ai.lotus.app.shizuku.RootState
 import ai.lotus.app.shizuku.ShizukuPhase
@@ -43,6 +45,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -481,6 +484,9 @@ fun GlassChatPanel(
   onTools: () -> Unit = {},
   /** 「工具」那一行右边的小字：几项已配好 / 共几项。 */
   toolsHint: String = "",
+  /** 系统工具权限：受限，或完全访问（任意 shell 仍逐次审批）。 */
+  fullSystemAccess: Boolean = false,
+  onPermission: () -> Unit = {},
   onNewChat: () -> Unit,
   onRename: () -> Unit,
   onDelete: () -> Unit,
@@ -576,6 +582,10 @@ fun GlassChatPanel(
     Spacer(Modifier.height(2.dp))
 
     // ---- 会话动作：一行一个，行高 38dp（原来是 46dp 还带一行解释，太占地方）----
+    PanelRow(
+      if (fullSystemAccess) "权限 · 完全访问" else "权限 · 受限",
+      onClick = onPermission,
+    )
     PanelRow(if (toolsHint.isBlank()) "工具" else "工具 · $toolsHint", onClick = onTools)
     PanelRow("开新聊天", onClick = onNewChat)
     PanelRow("修改聊天名称", onClick = onRename)
@@ -676,6 +686,7 @@ fun GlassConfirmDialog(
   body: String,
   confirmLabel: String,
   modifier: Modifier = Modifier,
+  scrollableBody: Boolean = false,
   onConfirm: () -> Unit,
   onDismiss: () -> Unit,
 ) {
@@ -706,7 +717,19 @@ fun GlassConfirmDialog(
     ) {
       Text(text = title, color = LotusPalette.Ink, fontSize = 16.sp, fontWeight = FontWeight.Medium)
       Spacer(Modifier.height(8.dp))
-      Text(text = body, color = LotusPalette.InkMuted, fontSize = 13.sp)
+      SelectionContainer {
+        Text(
+          text = body,
+          color = LotusPalette.InkMuted,
+          fontSize = 13.sp,
+          modifier =
+            if (scrollableBody) {
+              Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())
+            } else {
+              Modifier
+            },
+        )
+      }
       Spacer(Modifier.height(16.dp))
       Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         DialogButton(text = "取消", primary = false, modifier = Modifier.weight(1f)) { onDismiss() }
@@ -815,7 +838,10 @@ fun GlassToolsPanel(
   ocrReady: Boolean,
   rootState: RootState,
   shizukuState: ShizukuState,
+  computerStatus: ComputerStatus = ComputerStatus(),
+  computerChecking: Boolean = false,
   modifier: Modifier = Modifier,
+  onRefreshComputer: () -> Unit = {},
   onConnectRoot: () -> Unit = {},
   onConnectShizuku: () -> Unit = {},
   onDismiss: () -> Unit,
@@ -927,13 +953,59 @@ fun GlassToolsPanel(
           )
         }
       }
+
+      Spacer(Modifier.height(12.dp))
+      Box(Modifier.fillMaxWidth().height(0.7.dp).background(LotusPalette.Hairline))
+      Spacer(Modifier.height(10.dp))
+      Text("LinuxHub 本机工具", color = LotusPalette.Ink, fontSize = 13.sp)
+      Spacer(Modifier.height(2.dp))
+      Text(
+        text =
+          when {
+            computerChecking -> "正在读取 LinuxHub 工具目录…"
+            computerStatus.phase == ComputerPhase.Ready -> computerStatus.message
+            else -> computerStatus.message.ifBlank { "未连接 LinuxHub" }
+          },
+        color = LotusPalette.InkMuted,
+        fontSize = 10.5.sp,
+        lineHeight = 15.sp,
+      )
+      Spacer(Modifier.height(6.dp))
+      computerStatus.tools.forEach { tool ->
+        ToolStatusRow(computerToolLabel(tool.apiName), "可用")
+        Spacer(Modifier.height(3.dp))
+        Text(
+          text = tool.description,
+          color = LotusPalette.InkMuted,
+          fontSize = 10.sp,
+          lineHeight = 14.sp,
+          modifier = Modifier.padding(start = 2.dp, bottom = 5.dp),
+        )
+      }
+      if (computerStatus.tools.isEmpty()) {
+        Text(
+          "没有拿到工具目录。LinuxHub 服务未启动、Token 未配置或连接失败时，模型不会获得电脑工具。",
+          color = LotusPalette.InkMuted,
+          fontSize = 10.5.sp,
+          lineHeight = 15.sp,
+        )
+      }
       Spacer(Modifier.height(8.dp))
+      DialogButton(
+        text = if (computerChecking) "检测中…" else "重新检测 LinuxHub",
+        primary = computerStatus.phase != ComputerPhase.Ready,
+        modifier = Modifier.fillMaxWidth(),
+      ) {
+        if (!computerChecking) onRefreshComputer()
+      }
+
+      Spacer(Modifier.height(10.dp))
       Box(Modifier.fillMaxWidth().height(0.7.dp).background(LotusPalette.Hairline))
       Spacer(Modifier.height(10.dp))
       Text("系统工具", color = LotusPalette.Ink, fontSize = 13.sp)
       Spacer(Modifier.height(2.dp))
       Text(
-        "Root 优先，Shizuku 兜底；固定白名单工具，不开放任意 shell。",
+        "Root 优先，Shizuku 兜底。受限模式只开放固定工具；完全访问下的任意命令必须逐次审批。",
         color = LotusPalette.InkMuted,
         fontSize = 10.5.sp,
         lineHeight = 15.sp,
@@ -973,6 +1045,30 @@ fun GlassToolsPanel(
 }
 
 private data class ToolLine(val name: String, val detail: String, val state: String)
+
+private fun computerToolLabel(apiName: String): String =
+  when (apiName) {
+    "terminal.exec" -> "容器命令 · terminal.exec"
+    "desktop.start" -> "启动无头桌面 · desktop.start"
+    "desktop.status" -> "桌面状态 · desktop.status"
+    "desktop.stop" -> "停止桌面 · desktop.stop"
+    "desktop.screenshot" -> "桌面截图 · desktop.screenshot"
+    "desktop.input" -> "鼠标操作 · desktop.input"
+    "desktop.key" -> "键盘按键 · desktop.key"
+    "desktop.text" -> "输入文字 · desktop.text"
+    "desktop.launch_app" -> "启动应用 · desktop.launch_app"
+    "android.screenshot" -> "安卓截图 · android.screenshot"
+    "android.shell" -> "Android 命令 · android.shell"
+    "android.input" -> "Android 操作 · android.input"
+    "android.push" -> "推送文件 · android.push"
+    "android.pull" -> "拉取文件 · android.pull"
+    "android.install" -> "安装 APK · android.install"
+    "android.uninstall" -> "卸载应用 · android.uninstall"
+    "android.host_status" -> "Android 主机 · android.host_status"
+    "android.shizuku_status" -> "Shizuku 状态 · android.shizuku_status"
+    "system.info" -> "系统信息 · system.info"
+    else -> apiName
+  }
 
 @Composable
 private fun ToolStatusRow(name: String, value: String) {

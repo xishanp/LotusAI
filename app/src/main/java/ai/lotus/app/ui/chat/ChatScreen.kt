@@ -99,6 +99,8 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -212,6 +214,7 @@ fun ChatScreen(
 ) {
   val listState = rememberLazyListState()
   val clipboard = LocalContext.current.getSystemService(ClipboardManager::class.java)
+  var imagePreviewPath by remember { mutableStateOf<String?>(null) }
 
   // 新消息 / 模拟回复落地后，滚到最后一条（生图贴上来也要滚）。
   LaunchedEffect(messages.size, messages.lastOrNull()?.text, messages.lastOrNull()?.displayImagePaths?.joinToString("|")) {
@@ -247,9 +250,13 @@ fun ChatScreen(
             onRegenerate = onRegenerate,
             onDelete = onDelete,
             onOpenSources = onOpenSources,
+            onImageClick = { imagePreviewPath = it },
           )
         }
       }
+    }
+    imagePreviewPath?.let { path ->
+      ImagePreviewDialog(path = path, onDismiss = { imagePreviewPath = null })
     }
   }
 }
@@ -269,6 +276,7 @@ private fun MessageRow(
   onRegenerate: (Long) -> Unit = {},
   onDelete: (Long) -> Unit = {},
   onOpenSources: (List<String>) -> Unit = {},
+  onImageClick: (String) -> Unit = {},
 ) {
   // ⚠️ 四角**统一 20dp**（原来"朝头像那一角"收 6dp 做小尾巴，真机上读出来是个尖角，用户否掉了）。
   val shape = RoundedCornerShape(20.dp)
@@ -326,7 +334,8 @@ private fun MessageRow(
                 modifier =
                   Modifier.widthIn(max = if (compact) 150.dp else 232.dp)
                     .heightIn(max = if (compact) 190.dp else 300.dp)
-                    .clip(RoundedCornerShape(14.dp)),
+                    .clip(RoundedCornerShape(14.dp))
+                    .clickable { onImageClick(path) },
               )
             }
           }
@@ -423,6 +432,48 @@ private fun MessageRow(
       onOpenSources = onOpenSources,
       alignEnd = true,
     )
+  }
+}
+
+@Composable
+private fun ImagePreviewDialog(path: String, onDismiss: () -> Unit) {
+  val bitmap = rememberFileBitmap(path)
+  Dialog(
+    onDismissRequest = onDismiss,
+    properties = DialogProperties(usePlatformDefaultWidth = false),
+  ) {
+    Box(
+      modifier =
+        Modifier.fillMaxSize()
+          .background(Color.Black.copy(alpha = 0.9f))
+          .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) {
+            onDismiss()
+          },
+      contentAlignment = Alignment.Center,
+    ) {
+      if (bitmap != null) {
+        Image(
+          bitmap = bitmap,
+          contentDescription = "查看大图",
+          contentScale = ContentScale.Fit,
+          modifier =
+            Modifier.fillMaxWidth()
+              .padding(20.dp)
+              .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) {},
+        )
+      }
+      Box(
+        modifier =
+          Modifier.align(Alignment.TopEnd)
+            .padding(18.dp)
+            .size(42.dp)
+            .glassPanel(CircleShape, strength = 0.5f, rimAlpha = 0.45f)
+            .clickable { onDismiss() },
+        contentAlignment = Alignment.Center,
+      ) {
+        LotusIcon(LotusGlyph.Close, LotusPalette.Ink, Modifier.size(17.dp))
+      }
+    }
   }
 }
 

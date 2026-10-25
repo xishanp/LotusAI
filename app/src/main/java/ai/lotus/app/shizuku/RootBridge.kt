@@ -46,7 +46,8 @@ data class RootState(
 /**
  * 应用自己的 Root 后端。
  *
- * 这里不提供任意 shell：模型只能触发下方固定工具，所有动态参数都会先按严格格式校验。
+ * 受限模式只开放下方固定工具；用户开启“完全访问”后，模型可请求任意 shell，
+ * 但每条命令都会先在界面中展示，并暂停到用户逐次批准后才执行。
  * Android 没有一条名为“root”的普通运行时权限；实际授权由设备上的 root 管理器通过
  * `su` 弹窗完成。因此“获取 Root”第一次会触发系统的 su 授权，而不是应用权限弹窗。
  */
@@ -111,6 +112,8 @@ object RootBridge {
       runCatching {
           when (tool) {
             "device.status" -> deviceStatus(state)
+            "device.diagnostics" -> deviceDiagnostics(args)
+            "device.shell_exec" -> shellExec(args)
             "device.apps" -> deviceApps(args)
             "device.foreground" -> foregroundApp()
             "device.setting" -> readSetting(args)
@@ -151,6 +154,55 @@ object RootBridge {
       put("selinux", state.selinux)
       put("executor", "su")
     }
+
+  private suspend fun deviceDiagnostics(args: JsonObject): JsonObject {
+    val context = appContext ?: error("RootBridge 没有拿到 Context")
+    val category = args.string("category").trim().lowercase()
+    val limit = args.int("limit", 20).coerceIn(1, 100)
+    val data =
+      when (category) {
+        "memory" -> DeviceDiagnostics.memory(context)
+        "cpu" -> DeviceDiagnostics.cpu()
+        "storage" -> DeviceDiagnostics.storage(context)
+        "battery" -> DeviceDiagnostics.battery(context)
+        "network" -> DeviceDiagnostics.network(context)
+        "processes" -> {
+          val run = runRoot("PATH=/system/bin:/system/xbin; ps -A -o PID,PPID,USER,RSS,NAME")
+          if (!run.ok) error(run.error)
+          DeviceDiagnostics.processes(run.output, limit)
+        }
+        "thermal" -> {
+          val run = runRoot("PATH=/system/bin:/system/xbin; dumpsys thermalservice")
+          if (!run.ok) error(run.error)
+          DeviceDiagnostics.thermal(run.output)
+        }
+        else -> error("不支持的系统诊断类别：$category")
+      }
+    return buildJsonObject {
+      put("category", category)
+      data.forEach { (key, value) -> put(key, value) }
+    }
+  }
+
+  private suspend fun shellExec(args: JsonObject): JsonObject {
+    val command = args.string("command").trim()
+    require(command.isNotBlank()) { "命令不能为空" }
+    require(command.length <= 32_768) { "命令超过 32768 字符" }
+    val timeoutMs =
+      (args["timeoutMs"] as? JsonPrimitive)?.contentOrNull?.toLongOrNull()?.coerceIn(1_000L, 120_000L)
+        ?: 30_000L
+    val run = runRoot(command, timeoutMs)
+    if (!run.ok) error(run.error)
+    return buildJsonObject {
+      put("command", command)
+      put("stdout", run.output.trimEnd())
+      put("outputChars", run.output.length)
+      put("exitCode", run.exitCode)
+      put("timeoutMs", timeoutMs)
+      put("executorUid", 0)
+      put("executor", "root")
+    }
+  }
 
   private fun deviceApps(args: JsonObject): JsonObject {
     val context = appContext ?: error("RootBridge 没有拿到 Context")
@@ -284,7 +336,10 @@ object RootBridge {
 
   private data class RootCommand(val ok: Boolean, val output: String, val exitCode: Int, val error: String)
 
-  private suspend fun runRoot(command: String): RootCommand =
+  private suspend fun runRoot(
+    command: String,
+    timeoutMs: Long = CommandTimeoutMs,
+  ): RootCommand =
     withContext(Dispatchers.IO) {
       try {
         val process = ProcessBuilder("su", "-c", command).redirectErrorStream(true).start()
@@ -305,7 +360,7 @@ object RootBridge {
               name = "lotus-root-reader"
               start()
             }
-        val finished = process.waitFor(CommandTimeoutMs, TimeUnit.MILLISECONDS)
+        val finished = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
         if (!finished) {
           process.destroyForcibly()
           reader.join(1_000)

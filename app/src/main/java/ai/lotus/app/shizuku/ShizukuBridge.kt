@@ -232,7 +232,7 @@ object ShizukuBridge {
           ?: Shizuku.UserServiceArgs(ComponentName(activity, LotusShizukuService::class.java))
             .daemon(false)
             .processNameSuffix("shizuku")
-            .version(2)
+            .version(BuildConfig.VERSION_CODE)
             .debuggable(BuildConfig.DEBUG))
         .also { userServiceArgs = it }
     _state.value = ShizukuState(ShizukuPhase.Connecting, "正在启动 Shizuku 工具服务")
