@@ -39,8 +39,8 @@ android {
     applicationId = "ai.lotus.app"
     minSdk = 28
     targetSdk = 35
-    versionCode = 2026102401
-    versionName = "2026.10.24.1"
+    versionCode = 2026110101
+    versionName = "2026.11.01"
   }
 
   signingConfigs {

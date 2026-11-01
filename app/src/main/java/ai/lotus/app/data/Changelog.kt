@@ -19,6 +19,14 @@ object Changelog {
   val entries: List<Entry> =
     listOf(
       Entry(
+        version = "2026.11.01",
+        lines =
+          listOf(
+            "代码块新增独立的一键复制按钮，复制后显示“已复制”；支持一段消息里的多个代码块，也支持流式输出时尚未闭合的代码块。",
+            "LinuxHub 原项目仓库更新为 `xishanp/Linuxhub`，关于页与“Lotus的电脑”页面的仓库入口已同步。",
+          ),
+      ),
+      Entry(
         version = "2026.10.24.1",
         lines =
           listOf(

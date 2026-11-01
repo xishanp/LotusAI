@@ -7,9 +7,9 @@ import org.junit.Test
 class ProjectLinksTest {
   @Test
   fun keepsLinuxHubSourceAndLotusDistributionSeparate() {
-    assertEquals("xishanp/doroUbuntu", ProjectLinks.DoroUbuntuRepo)
+    assertEquals("xishanp/Linuxhub", ProjectLinks.LinuxHubSourceRepo)
     assertEquals("xishanp/LotusAI", ProjectLinks.LotusDistributionRepo)
-    assertNotEquals(ProjectLinks.DoroUbuntuRepo, ProjectLinks.LotusDistributionRepo)
+    assertNotEquals(ProjectLinks.LinuxHubSourceRepo, ProjectLinks.LotusDistributionRepo)
   }
 
   @Test

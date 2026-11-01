@@ -435,13 +435,13 @@ fun LotusComputerScreen(bottomInset: Dp, onBack: () -> Unit) {
     SettingsGroup(enter = 3) {
       SettingsRow(
         title = "LinuxHub 原项目",
-        value = ProjectLinks.DoroUbuntuRepo,
+        value = ProjectLinks.LinuxHubSourceRepo,
         icon = LotusGlyph.Globe,
         onClick = {
           runCatching {
             context.startActivity(
               Intent(Intent.ACTION_VIEW).apply {
-                data = Uri.parse(ProjectLinks.DoroUbuntuUrl)
+                data = Uri.parse(ProjectLinks.LinuxHubSourceUrl)
               }
             )
           }

@@ -7,8 +7,8 @@ object ProjectLinks {
   const val LotusDistributionUrl = "https://github.com/xishanp/LotusAI"
 
   /** LinuxHub 的原项目仓库。 */
-  const val DoroUbuntuRepo = "xishanp/doroUbuntu"
-  const val DoroUbuntuUrl = "https://github.com/xishanp/doroUbuntu"
+  const val LinuxHubSourceRepo = "xishanp/Linuxhub"
+  const val LinuxHubSourceUrl = "https://github.com/xishanp/Linuxhub"
 
   const val AuthorGitHub = "xishanp"
   const val AuthorGitHubUrl = "https://github.com/xishanp"

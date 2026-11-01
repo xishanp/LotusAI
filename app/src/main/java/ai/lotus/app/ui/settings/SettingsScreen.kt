@@ -1954,12 +1954,12 @@ private fun AboutPane(
         Hairline()
         SettingsRow(
           "LinuxHub 原项目",
-          ProjectLinks.DoroUbuntuRepo,
+          ProjectLinks.LinuxHubSourceRepo,
           chevron = true,
           onClick = {
             runCatching {
               context.startActivity(
-                Intent(Intent.ACTION_VIEW).apply { data = Uri.parse(ProjectLinks.DoroUbuntuUrl) }
+                Intent(Intent.ACTION_VIEW).apply { data = Uri.parse(ProjectLinks.LinuxHubSourceUrl) }
               )
             }
           },

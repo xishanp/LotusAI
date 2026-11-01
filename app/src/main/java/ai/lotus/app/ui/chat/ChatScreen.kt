@@ -34,6 +34,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -72,6 +73,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.text.Placeholder
 import androidx.compose.ui.text.PlaceholderVerticalAlign
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.Alignment
@@ -741,16 +743,179 @@ private fun clockOf(at: Long): String =
 @Composable
 private fun MessageText(message: ChatMessage) = PlainText(message.text)
 
+internal sealed interface MessageBlock {
+  data class Text(val content: String) : MessageBlock
+
+  data class Code(val language: String, val content: String) : MessageBlock
+}
+
+private data class Fence(val marker: Char, val length: Int, val info: String)
+
+private val FencePattern = Regex("""^\s{0,3}(`{3,}|~{3,})(.*)$""")
+
+private fun fenceOf(line: String): Fence? {
+  val match = FencePattern.matchEntire(line) ?: return null
+  val marker = match.groupValues[1]
+  return Fence(
+    marker = marker.first(),
+    length = marker.length,
+    info = match.groupValues[2].trim(),
+  )
+}
+
+/** 只拆围栏代码块；普通正文仍按原文显示，不引入整套 Markdown 渲染器。 */
+internal fun parseMessageBlocks(raw: String): List<MessageBlock> {
+  if (raw.isBlank()) return emptyList()
+  val text = raw.replace("\r\n", "\n").replace('\r', '\n')
+  val blocks = mutableListOf<MessageBlock>()
+  val plain = StringBuilder()
+  var code: StringBuilder? = null
+  var language = "代码"
+  var openFence: Fence? = null
+
+  fun flushPlain() {
+    val content = plain.toString().trim('\n')
+    if (content.isNotEmpty()) blocks += MessageBlock.Text(content)
+    plain.clear()
+  }
+
+  fun flushCode() {
+    val content = code?.toString()?.trimEnd('\n').orEmpty()
+    if (content.isNotEmpty()) blocks += MessageBlock.Code(language, content)
+    code = null
+    openFence = null
+  }
+
+  for (line in text.split('\n')) {
+    val fence = fenceOf(line)
+    val currentCode = code
+    if (currentCode == null) {
+      if (fence != null) {
+        flushPlain()
+        openFence = fence
+        language = fence.info.substringBefore(' ').trim().ifBlank { "代码" }.take(24)
+        code = StringBuilder()
+      } else {
+        if (plain.isNotEmpty()) plain.append('\n')
+        plain.append(line)
+      }
+    } else {
+      val currentFence = openFence
+      val closes =
+        fence != null &&
+          currentFence != null &&
+          fence.marker == currentFence.marker &&
+          fence.length >= currentFence.length
+      if (closes) {
+        flushCode()
+      } else {
+        if (currentCode.isNotEmpty()) currentCode.append('\n')
+        currentCode.append(line)
+      }
+    }
+  }
+
+  // 流式输出时代码块可能还没收到结尾围栏；先按代码显示，收到闭合后自动还原。
+  if (code != null) flushCode() else flushPlain()
+  return blocks
+}
+
 @Composable
 private fun PlainText(text: String) {
-  // 长按文字 = 系统那套"选取 / 复制 / 全选"（用户 2026-10-11 点名要的）。
-  SelectionContainer {
-    Text(
-      text = text,
-      color = LotusPalette.Ink,
-      fontSize = 15.sp,
-      lineHeight = 22.sp,
-    )
+  val blocks = remember(text) { parseMessageBlocks(text) }
+  val context = LocalContext.current
+  Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
+    blocks.forEach { block ->
+      when (block) {
+        is MessageBlock.Text ->
+          // 长按文字 = 系统那套"选取 / 复制 / 全选"（用户 2026-10-11 点名要的）。
+          SelectionContainer {
+            Text(
+              text = block.content,
+              color = LotusPalette.Ink,
+              fontSize = 15.sp,
+              lineHeight = 22.sp,
+            )
+          }
+        is MessageBlock.Code -> CodeBlock(block, context)
+      }
+    }
+  }
+}
+
+@Composable
+private fun CodeBlock(block: MessageBlock.Code, context: Context) {
+  var copied by remember(block.content) { mutableStateOf(false) }
+  LaunchedEffect(copied) {
+    if (copied) {
+      delay(1_400)
+      copied = false
+    }
+  }
+  val press = rowPress(RoundedCornerShape(8.dp), scale = 1.04f, strength = 0.18f)
+  Column(
+    modifier =
+      Modifier.fillMaxWidth()
+        .clip(RoundedCornerShape(12.dp))
+        .background(LotusPalette.Ink.copy(alpha = 0.045f))
+        .padding(top = 7.dp, bottom = 9.dp),
+  ) {
+    Row(
+      modifier = Modifier.fillMaxWidth().padding(start = 10.dp, end = 6.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Text(
+        text = block.language,
+        color = LotusPalette.InkFaint,
+        fontSize = 10.sp,
+        modifier = Modifier.weight(1f),
+      )
+      Row(
+        modifier =
+          Modifier.clip(RoundedCornerShape(8.dp))
+            .then(press.modifier)
+            .clickable(interactionSource = press.interaction, indication = null) {
+              val clipboard = context.getSystemService(ClipboardManager::class.java)
+              if (clipboard != null) {
+                clipboard.setPrimaryClip(ClipData.newPlainText("Lotus code", block.content))
+                copied = true
+              }
+            }
+            .semantics { contentDescription = if (copied) "代码已复制" else "复制代码" }
+            .padding(horizontal = 6.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        LotusIcon(
+          glyph = if (copied) LotusGlyph.Check else LotusGlyph.Copy,
+          tint = LotusPalette.Ink.copy(alpha = if (copied) 0.72f else 0.48f),
+          modifier = Modifier.size(13.dp),
+        )
+        Spacer(Modifier.width(4.dp))
+        Text(
+          text = if (copied) "已复制" else "复制",
+          color = LotusPalette.Ink.copy(alpha = if (copied) 0.72f else 0.48f),
+          fontSize = 10.sp,
+        )
+      }
+    }
+    Spacer(Modifier.height(5.dp))
+    Box(
+      modifier =
+        Modifier.fillMaxWidth()
+          .horizontalScroll(rememberScrollState())
+          .padding(horizontal = 10.dp)
+    ) {
+      SelectionContainer {
+        Text(
+          text = block.content,
+          color = LotusPalette.Ink,
+          fontFamily = FontFamily.Monospace,
+          fontSize = 13.sp,
+          lineHeight = 19.sp,
+          modifier = Modifier.widthIn(min = 0.dp),
+        )
+      }
+    }
   }
 }
 
