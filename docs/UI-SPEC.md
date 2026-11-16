@@ -1,6 +1,10 @@
 # Lotus AI —— 界面规格（已定稿）
 
 定稿图：`~/.Trash/lotus-ai-output-2026-10-16/imagegen/ui-glass-12-home-final.png`（首页；原 `output/imagegen/` 2026-10-16 整体移入废纸篓）
+
+> **2026-11-16 口径修正（优先于下方旧描述）**：液态玻璃**不做背景模糊**。
+> 正确材质是：全通透背景采样 + 边缘 `lens()` 折射 + 色散 + 镜面高光 + 轻阴影。
+> 不使用 `blur()`、`vibrancy()`、霜面或实色玻璃体。下方涉及“模糊必选/霜面必选”的旧条目作废。
 对话状态：`~/.Trash/lotus-ai-output-2026-10-16/imagegen/ui-glass-11-chat.png`（同上）
 
 ---

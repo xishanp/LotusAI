@@ -58,9 +58,7 @@ import com.kyant.backdrop.backdrops.layerBackdrop
 import com.kyant.backdrop.backdrops.rememberCombinedBackdrop
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import com.kyant.backdrop.drawBackdrop
-import com.kyant.backdrop.effects.blur
 import com.kyant.backdrop.effects.lens
-import com.kyant.backdrop.effects.vibrancy
 import com.kyant.backdrop.highlight.Highlight
 import com.kyant.backdrop.shadow.InnerShadow
 import com.kyant.backdrop.shadow.Shadow
@@ -68,7 +66,7 @@ import com.kyant.backdrop.shadow.Shadow
 /**
  * Lotus AI 的液态玻璃基础设施。
  *
- * ## 两层 backdrop（这是"背景模糊"能看见的关键）
+ * ## 两层 backdrop（这是边缘折射能看见的关键）
  *
  * ```
  * ① Box.layerBackdrop(baseBackdrop) { Box(纯色底) }        ← 底色在内层，才会被录进纹理
@@ -77,18 +75,16 @@ import com.kyant.backdrop.shadow.Shadow
  * ③ CompositionLocalProvider(LocalGlassBackdrop = combined(base, page)) { 悬浮玻璃层 }
  * ```
  *
- * **为什么必须两层**：`blur()` 模糊的是"玻璃后面"的内容。如果只录纯白底色，
- * 输入条被键盘顶上内容层时，它背后是白的，`blur(白)=白` —— 看起来就是"没接模糊"。
- * 把页面内容录进 pageBackdrop 之后，输入条压到立绘/引导语上就会真的把它们糊掉。
+ * **为什么必须两层**：边缘 `lens()` 采样的是玻璃后面的真实内容。只录纯色底，
+ * 折射只能看到单一颜色；把页面内容录进 pageBackdrop，玻璃才能把立绘、文字和控件的边缘真实折弯。
  *
  * ## 四条硬约束（踩过，别改）
  *
  *  - **底色必须画在 `layerBackdrop` 之内**（见下面 ① 的长注释）。写在它外面 = 录到全透明的源
- *    = 既没有模糊、也不遮底（折射出重影）。这一条是最反直觉、也最容易写错的一条。
+ *    = 没有可折射内容，也挡不住底图（容易出现重影）。这一条是最反直觉、也最容易写错的一条。
  *  - 玻璃组件必须是**录制盒的兄弟节点**，不能是自己采样自己的递归源 → `prepareTreeImpl` 无限递归 → SIGSEGV。
  *  - 页面内的玻璃（引导语砖）必须只采样 `baseBackdrop`。采样 `pageBackdrop` 会自采样。
- *  - 玻璃体只允许 [glassVeilBrush] 那一层"上透下灰"的霜面。不要往玻璃体里铺另一个实色灰块 ——
- *    纯白底叠一层均匀灰会读成"脏玻璃"（用户两次否过）。
+ *  - 玻璃体保持全通透：不铺霜面、不加实色灰块，只保留边缘折射与镜面高光。
  */
 
 /** 背景层句柄。未提供时玻璃组件退化为普通 Modifier，不会崩。 */
@@ -100,8 +96,8 @@ enum class LotusBackgroundStyle {
    * **苹果风白底（默认）**。
    *
    * 不是一块死白：中心偏上有一团几乎察觉不到的柔光，四周极轻收边 ——
-   * 这样玻璃"能糊到东西、有明暗可折"，白底上才立得起来。
-   * 纯 `#FFFFFF` 平底会让玻璃完全隐形（用户："就算是纯白背景苹果也能一眼看出来"）。
+   * 这样玻璃"有细节可折"，白底上边缘折射才立得起来。
+   * 纯 `#FFFFFF` 平底会让边缘折射缺少明暗细节。
    */
   Apple,
 
@@ -123,7 +119,6 @@ internal fun glassRimBrush(alpha: Float = 1f): Brush =
   Brush.verticalGradient(
     // ⚠️ 这三段的比例是"白底上能不能一眼看出是玻璃"的关键，别随手调平。
     // 0.00 那一刀必须是**高 alpha 的纯白镜面**（苹果的 specular）。白底上白色高光本来是看不见的，
-    // 它能被看见全靠下面 [glassVeilBrush] 把玻璃体压暗了几个百分点 —— 体暗、边亮，边才成立。
     0.00f to Color.White.copy(alpha = 0.92f * alpha),
     0.10f to Color.White.copy(alpha = 0.16f * alpha),
     // 中段：极淡的墨，给玻璃"厚度"。
@@ -224,36 +219,6 @@ internal fun Modifier.glassRim(
   }
 
 /**
- * 玻璃的"霜面"（frost veil）。
- *
- * ## 为什么必须有它（这条推翻了"纯透才是好玻璃"的直觉）
- *
- * `blur()` 模糊的是玻璃**后面**的东西。首页那块画布是纯白，玻璃后面也是纯白 ——
- * `blur(白)` 还是白，`vibrancy(白)` 还是白。**纯白玻璃压在纯白画布上，物理上就是不可见的。**
- * 这就是用户两次说的"输入框都还是没有模糊效果"：不是模糊没接上（它接上了，键盘抬起压住
- * 引导语时是能看见糊开的），而是**没东西可糊的时候，玻璃就退化成了一条描边**。
- *
- * Apple 的做法也一样：Liquid Glass 一定带一层极淡的磨砂，**上沿几乎全透、下沿收一点灰**，
- * 玻璃才有"面"。所以这里给一个 0 → 2% → 7% 的竖向渐变：
- *
- *  - 顶部 `Transparent` = 保住通透感（别再往玻璃体里铺实色，那条路用户已经否过：会灰）；
- *  - 底部 7% Ink = 唯一的那点"厚度"，纯白底上正好读成一块磨砂玻璃而不是一块脏灰块。
- *
- * @param scale 1 = 标准浮层；左上角那类小圆钮用 0.5 左右更透。
- */
-internal fun glassVeilBrush(scale: Float = 1f): Brush =
-  Brush.verticalGradient(
-    // ⚠️ 顶部**不再是全透**。旧配方是 0% -> 2% -> 7%，只有下沿有灰：白底上读出来就是
-    // 「一块白板 + 下沿一条阴影」，不是玻璃（用户原话：「背景不透…只有选中的地方有一点点折射」）。
-    // 苹果的 regular 变体在 HIG 里的定义是 "blurs and **adjusts the luminosity** of background
-    // content" —— 亮背景主动压暗，这是材质层，不是 bug。纯白 #FFFFFF 是亮度天花板，白高光在白底上
-    // 不可能更亮，所以"看得见"只能靠体色比画布暗几个百分点换来。
-    0.00f to LotusPalette.Ink.copy(alpha = 0.016f * scale),
-    0.55f to LotusPalette.Ink.copy(alpha = 0.030f * scale),
-    1.00f to LotusPalette.Ink.copy(alpha = 0.052f * scale),
-  )
-
-/**
  * 苹果风白底的"环境光" —— 一块几乎全是白的底，但有两件事在发生：
  *
  *  1. **中心偏上一团极淡的柔光**：模拟室内/天光从上方打下来，画面是"亮的"，
@@ -320,9 +285,9 @@ fun GlassBackground(
     // `drawContent()` 只画**本 modifier 之内**的内容。`.background()` 写在 `.layerBackdrop()` 前面
     // 就是**外面** ⇒ 录进那份纹理的是**全透明**（Solid 分支下面什么都不画）。
     //
-    // 全透明的源会同时毁掉两件事：
-    //   1. `blur()` / `vibrancy()` 对透明毫无作用 ⇒ 玻璃"没有面"，也没得可糊（用户："为什么不能全局模糊"）；
-    //   2. 玻璃不遮底 ⇒ 折射出的图标叠在原来那枚图标上 ⇒ **残影**（用户："倒是把残影给装上了"）。
+    // 全透明的源会毁掉两件事：
+    //   1. `lens()` 没有背景细节可折，玻璃边缘失效；
+    //   2. 玻璃不遮底 ⇒ 折射出的图标叠在原来那枚图标上 ⇒ **残影**。
     Box(modifier = Modifier.fillMaxSize().layerBackdrop(baseBackdrop)) {
       Box(modifier = Modifier.fillMaxSize().background(baseColor)) {
         when (style) {
@@ -368,18 +333,10 @@ fun GlassBackground(
 }
 
 /**
- * ## 全 App 的液态玻璃配方（2026-10-11 定稿，用户点名"以后 UI 都用这种"）
+ * 全 App 液态玻璃：零模糊、全通透、只保留边缘折射与镜面高光。
  *
- * 用户认可的参照图 = 一张模型切换面板：**背后内容还看得清轮廓（轻模糊）、边缘一圈明显折射、
- * 边角带色散彩边、外圈一道白高光**。要复现它必须把两件事**分开**：
- *
- *  - [LiquidBlurScale] 0.32 —— 模糊只留一点点雾。取 1 就是普通高斯毛玻璃（用户明确否过）。
- *  - [LiquidLensScale] 1.5 —— 折射比模糊重得多，玻璃的"鼓面"从边缘长出来。
- *
- * ⚠️ 别再让模糊和折射共用一个系数。上一版就是 `blur = 16dp×strength`、`lens = 20dp×strength`，
- * 想加强折射就只能连模糊一起抬，一抬就到 16dp 高斯 —— 那不是设计选择，是参数缺陷。
+ * [LiquidLensScale] 只控制折射，不再存在 blur 系数。
  */
-const val LiquidBlurScale: Float = 0.32f
 const val LiquidLensScale: Float = 1.5f
 
 /**
@@ -387,17 +344,14 @@ const val LiquidLensScale: Float = 1.5f
  *
  * 绘制顺序（**别调**）：
  *  1. `shadow` —— 面板外的柔影。
- *  2. `drawBackdrop` —— 折射 / 模糊 / 色散 / vibrancy。**这几样一个都不能砍**：
- *     砍了 blur 就没模糊，砍了 lens 就没扭曲（两个都被用户点名要求过）。
- *  3. `border(glassRimBrush())` —— 上白下灰的玻璃边。
+ *  2. `drawBackdrop` —— 只做折射 / 色散。零模糊版本不调用 blur 或 vibrancy。
+ *  3. `glassRim()` —— 边缘镜面高光与轻微色散。
  *
  * @param strength 0..1，越大折射/模糊越强。芯片 0.3~0.45，输入条 0.5，浮层 0.6+。
  * @param tint 额外叠色。**默认 null**：白底上实色会把玻璃变成灰块。
  * @param elevation 外投影高度。0 = 不要影子。
  * @param rimAlpha 描边浓度。越小越通透（左上角圆钮用过）。
- * @param veil 霜面浓度。1 = 标准浮层；0.5 更透；0 = 完全不要霜面（只在深色画布上才该这么干）。
- * @param blurScale 模糊倍率（相对 strength）。**液态玻璃取 0.25~0.4**：背后内容还看得清轮廓，
- *   只有一层雾。取 1 就是普通高斯毛玻璃 —— 用户明确否过。
+ * @param veil 兼容旧调用；零模糊版本不再绘制霜面。
  * @param lensScale 折射倍率（相对 strength）。**边缘玻璃感靠它**，液态玻璃取 1.3~1.8。
  */
 @Composable
@@ -408,7 +362,6 @@ fun Modifier.glassPanel(
   elevation: Dp = 7.dp,
   rimAlpha: Float = 0.55f,
   veil: Float = 1f,
-  blurScale: Float = LiquidBlurScale,
   lensScale: Float = LiquidLensScale,
   backdrop: Backdrop? = LocalGlassBackdrop.current,
   exportedBackdrop: LayerBackdrop? = null,
@@ -418,7 +371,6 @@ fun Modifier.glassPanel(
   // 模糊与折射**分开调**：液态玻璃的观感是"背后几乎看得清（轻模糊）+ 边缘一圈明显折射"，
   // 不是整块高斯模糊。原来两者死绑在同一个 strength 上，要折射就得一起糊 —— 那正是
   // 用户否掉的"糊成高斯模糊"。
-  val blurPx = with(density) { (16f * strength * blurScale).dp.toPx() }
   val lensPx = with(density) { (20f * strength * lensScale).dp.toPx() }
   return this
     .shadow(
@@ -433,8 +385,6 @@ fun Modifier.glassPanel(
       shape = { shape },
       exportedBackdrop = exportedBackdrop,
       effects = {
-        vibrancy()
-        if (blurPx > 0f) blur(blurPx)
         if (lensPx > 0f) {
           // 折射带**比玻璃尺寸窄**：能量集中在边缘一圈，中间保持清澈。
           // 第一参 = 边缘折射带的高度，第二参 = 位移量（越大越"玻璃鼓起来"）。
@@ -447,8 +397,6 @@ fun Modifier.glassPanel(
       // 恒 0：内投影画在玻璃内部，浅色底上会变成中央一块灰。
       innerShadow = { InnerShadow(radius = 0f.dp, alpha = 0f) },
       onDrawSurface = {
-        // 霜面：玻璃在纯白底上唯一的"面"。见 [glassVeilBrush] 的说明。
-        if (veil > 0f) drawRect(brush = glassVeilBrush(scale = veil))
         tint?.let { drawRect(it) }
       },
     )
@@ -470,7 +418,7 @@ fun Modifier.glassPanel(
  * 于是弹层比周围亮一截 —— 看起来就像"贴上去的一张白纸"，这就是"颜色跟背景不一样"。
  *
  * 统一后的规则：
- *  1. **不发白霜**（`tint` 默认 null）。玻璃的"面"只由 [glassVeilBrush] 那层亮度微调给；
+ *  1. **不发白霜**（`tint` 默认 null），保持全透明；
  *  2. 描边浓度全部 = [FloatingGlassRimAlpha]（0.55），不再一个一个调；
  *  3. 底下有 scrim 的模态弹层，用 [dim] 把自身压暗到跟被压暗的页面同一个亮度 ——
  *     亮度接上了，"颜色不一样"才真正消失。
@@ -492,7 +440,6 @@ fun Modifier.floatGlass(
   elevation: Dp = 16.dp,
   veil: Float = 1f,
   dim: Float = 0f,
-  blurScale: Float = LiquidBlurScale,
 ): Modifier =
   glassPanel(
     shape = shape,
@@ -502,7 +449,6 @@ fun Modifier.floatGlass(
     elevation = elevation,
     rimAlpha = FloatingGlassRimAlpha,
     veil = veil,
-    blurScale = blurScale,
   )
 
 /**
@@ -531,7 +477,6 @@ fun Modifier.glassInline(
   val a = active.coerceIn(0f, 1f)
   if (a <= 0.001f) return this
   val density = LocalDensity.current
-  val blurPx = with(density) { (16f * strength * LiquidBlurScale).dp.toPx() * a }
   val lensPx = with(density) { (20f * strength * lensScale).dp.toPx() * a }
   return this
     // ---- ⚠️ 2026-10-16：按下必须**看得见**，不能只靠折射 ----
@@ -543,8 +488,7 @@ fun Modifier.glassInline(
     //
     // 所以按下时让这块玻璃**真的离开纸面一点点**，三样都跟按压强度 a 走：
     //   ① 投影（Modifier.shadow）：抬起来才有影子，白底上最读得出来；
-    //   ② 玻璃体（glassVeilBrush）：见它头部那段 —— 纯白底上白高光不可能更亮，
-    //      只有把体色压暗几个百分点，边上那圈镜面高光才成立；
+    //   ② 边缘透镜：按下增强 lens 与色散，不铺霜面、不改变背景清晰度；
     //   ③ 镜面描边（glassRim）：苹果那圈 specular。
     // ⛔ 依然不许用"整块变灰"当反馈（那是用户否掉的传统 ripple）。
     .shadow(
@@ -558,14 +502,12 @@ fun Modifier.glassInline(
       backdrop = backdrop,
       shape = { shape },
       effects = {
-        vibrancy()
-        if (blurPx > 0f) blur(blurPx)
         if (lensPx > 0f) lens(lensPx * 0.78f, lensPx * 1.5f, chromaticAberration = true)
       },
       highlight = { Highlight.Default.copy(width = 1.dp, alpha = 0.90f * a) },
       shadow = { Shadow(alpha = 0f) },
       innerShadow = { InnerShadow(radius = 0f.dp, alpha = 0f) },
-      onDrawSurface = { drawRect(brush = glassVeilBrush(scale = a)) },
+      onDrawSurface = {},
     )
     .glassRim(shape = shape, alpha = 0.9f * a)
 }
@@ -663,7 +605,6 @@ fun GlassSurface(
   elevation: Dp = 7.dp,
   rimAlpha: Float = 0.55f,
   veil: Float = 1f,
-  blurScale: Float = LiquidBlurScale,
   lensScale: Float = LiquidLensScale,
   contentAlignment: Alignment = Alignment.Center,
   content: @Composable BoxScope.() -> Unit,
@@ -677,7 +618,6 @@ fun GlassSurface(
         elevation = elevation,
         rimAlpha = rimAlpha,
         veil = veil,
-        blurScale = blurScale,
         lensScale = lensScale,
       ),
     contentAlignment = contentAlignment,
@@ -845,9 +785,6 @@ fun LiquidGlassIconButton(
               shape = { shape },
               effects = {
                 val p = press.value
-                vibrancy()
-                // 同一个配方：轻模糊（原 8dp 是重高斯，玻璃壳读起来像一块磨砂塑料）。
-                blur(3.5f.dp.toPx())
                 // ⚠️ 静止时**也要**有折射和色散。原来 lens 只在图标层、且只在按下时才出现，
                 //    于是壳在静止时=一块纯白圆片，用户原话「只有选中的那块玻璃才反射」。
                 //    采光＝边缘折射 + 色散，按键必须**静止就能一眼看出来**，不是在按下去之后。
@@ -860,9 +797,7 @@ fun LiquidGlassIconButton(
               },
               shadow = { Shadow(alpha = 0f) },
               innerShadow = { InnerShadow(radius = 0f.dp, alpha = 0f) },
-              onDrawSurface = {
-                if (face > 0f) drawRect(brush = glassVeilBrush(scale = face))
-              },
+              onDrawSurface = {},
             )
             .glassRim(shape, alpha = 0.55f),
       )
@@ -910,9 +845,6 @@ fun LiquidGlassIconButton(
               effects = {
                 val p = press.value
                 if (p > 0.01f) {
-                  vibrancy()
-                  // 比父玻璃那层雾再厚一点：按下去要一眼看出"这块更玻璃"。
-                  blur(5f.dp.toPx() * p)
                   lens(lensPx * 1.1f * p, lensPx * 1.6f * p, chromaticAberration = true)
                 }
               },
@@ -963,8 +895,6 @@ fun LiquidGlassIconButton(
               innerShadow = { InnerShadow(radius = 0f.dp, alpha = 0f) },
               onDrawSurface = {
                 val p = press.value
-                // 嵌在父玻璃里的按钮（输入条内）自己不糊背景，那块"面"只能靠霜面给。
-                if (shell == null && face > 0f) drawRect(brush = glassVeilBrush(scale = face))
                 val f = touch.value
                 if (p > 0.01f && f != null) fingerGlow(Offset(f.x * boxPx, f.y * boxPx), p)
               },

@@ -137,7 +137,7 @@ fun ConversationHistoryPanel(
         // 浮层玻璃统一配方（floatGlass）：不发白霜、描边浓度跟全 App 一致。
         // 菜单背后经常直接压着正文；保留低模糊的观感，但比页面内玻璃略高，
         // 让列表文字不会从菜单里透出来叠成重影。
-        .floatGlass(shape = shape, strength = 0.55f, elevation = 14.dp, blurScale = 0.58f)
+        .floatGlass(shape = shape, strength = 0.55f, elevation = 14.dp)
         .padding(vertical = 8.dp),
   ) {
     // 标题行 + 新建
@@ -501,7 +501,7 @@ fun GlassChatPanel(
         .width(248.dp)
         // 面板背后可能是聊天气泡正文。低模糊口径不变，但必须足够把正文从“可读”
         // 压成“轮廓”，否则透明玻璃会和面板文字叠在一起。
-        .floatGlass(shape = shape, strength = 0.55f, elevation = 14.dp, blurScale = 0.58f)
+        .floatGlass(shape = shape, strength = 0.55f, elevation = 14.dp)
         // 吃掉落在面板空白处的点击，别让它们穿到底下的 scrim 上把面板关掉。
         .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {}
         .padding(horizontal = 16.dp, vertical = 12.dp),
