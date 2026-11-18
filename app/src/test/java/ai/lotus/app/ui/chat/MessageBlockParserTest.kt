@@ -1,6 +1,7 @@
 package ai.lotus.app.ui.chat
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -47,5 +48,30 @@ class MessageBlockParserTest {
     assertEquals("json", (blocks[0] as MessageBlock.Code).language)
     assertEquals("中间", (blocks[1] as MessageBlock.Text).content)
     assertEquals("sh", (blocks[2] as MessageBlock.Code).language)
+  }
+}
+
+class InlineMarkdownTest {
+  @Test
+  fun malformedFeishuLinkIsRenderedAsLabelNotMarkdownJunk() {
+    val raw = "看这里 [feishu.cn]\\([https://www.feishu.cn/hc/zh-CN/articles/1?utm_source=openai))"
+    val rendered = formatInlineMarkdown(raw).text
+    assertTrue(rendered.contains("看这里 feishu.cn"))
+    assertFalse(rendered.contains("]("))
+    assertFalse(rendered.contains("\\("))
+  }
+
+  @Test
+  fun boldAndInlineCodeLoseTheirMarkers() {
+    val rendered = formatInlineMarkdown("**Kotlin** 使用 `MAX_LINES`。").text
+    assertEquals("Kotlin 使用 MAX_LINES。", rendered)
+  }
+
+  @Test
+  fun inlineCodeNestedInsideBoldLosesBackticks() {
+    val rendered =
+      formatInlineMarkdown("**Kotlin（JVM 11+，新增一条记录；`Name` 须为现有文本字段）：**").text
+    assertEquals("Kotlin（JVM 11+，新增一条记录；Name 须为现有文本字段）：", rendered)
+    assertFalse(rendered.contains("`"))
   }
 }

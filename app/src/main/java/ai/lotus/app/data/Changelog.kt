@@ -19,6 +19,15 @@ object Changelog {
   val entries: List<Entry> =
     listOf(
       Entry(
+        version = "2026.11.18",
+        lines =
+          listOf(
+            "修复模型回复中的畸形链接、加粗和行内代码标记直接露出的问题；嵌套在加粗段里的反引号也会正确清理。",
+            "聊天正文按屏幕宽度自适应排版，代码块与来源不再挤在同一行或互相覆盖。",
+            "围栏代码块继续保持独立横向滚动、语言标记和一键复制。",
+          ),
+      ),
+      Entry(
         version = "2026.11.16",
         lines =
           listOf(

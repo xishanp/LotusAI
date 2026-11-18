@@ -70,9 +70,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameMillis
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.Placeholder
 import androidx.compose.ui.text.PlaceholderVerticalAlign
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -90,6 +94,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
@@ -169,9 +174,6 @@ data class ChatDisplay(
   val showChars: Boolean = false,
 )
 
-/** 气泡最大宽度。留出两侧头像 + 边距，超过就该换行了。 */
-private val BubbleMaxWidth = 288.dp
-
 /**
  * 聊天页（模拟）。
  *
@@ -217,6 +219,8 @@ fun ChatScreen(
   val listState = rememberLazyListState()
   val clipboard = LocalContext.current.getSystemService(ClipboardManager::class.java)
   var imagePreviewPath by remember { mutableStateOf<String?>(null) }
+  // 气泡不设固定内容宽度；只按屏幕宽度计算一条很薄的安全缝。
+  val horizontalInset = (LocalConfiguration.current.screenWidthDp * 0.02f).coerceIn(6f, 14f).dp
 
   // 新消息 / 模拟回复落地后，滚到最后一条（生图贴上来也要滚）。
   LaunchedEffect(messages.size, messages.lastOrNull()?.text, messages.lastOrNull()?.displayImagePaths?.joinToString("|")) {
@@ -232,8 +236,8 @@ fun ChatScreen(
         modifier = Modifier.fillMaxWidth().weight(1f),
         contentPadding =
           PaddingValues(
-            start = 16.dp,
-            end = 16.dp,
+            start = horizontalInset,
+            end = horizontalInset,
             // 顶部留出悬浮钮的高度（保住第一屏观感，消息一多照样从玻璃底下滑过去）。
             top = 76.dp,
             bottom = bottomInset + keyboardInset + 12.dp,
@@ -380,7 +384,7 @@ private fun MessageRow(
         Spacer(Modifier.height(6.dp))
         Box(
           modifier =
-            Modifier.widthIn(max = BubbleMaxWidth)
+            Modifier.fillMaxWidth()
               .then(bubbleFeedback)
               .glassPanel(shape = shape, strength = 0.45f, rimAlpha = 0.55f, elevation = 6.dp)
               .padding(horizontal = 14.dp, vertical = 10.dp),
@@ -405,20 +409,19 @@ private fun MessageRow(
   }
 
   Column(modifier = rowModifier, horizontalAlignment = Alignment.End) {
-    Row(verticalAlignment = Alignment.Top) {
-      Box(
-        modifier =
-          Modifier.widthIn(max = BubbleMaxWidth)
-            .then(bubbleFeedback)
-            .glassPanel(shape = shape, strength = 0.45f, rimAlpha = 0.55f, elevation = 6.dp)
-            .padding(horizontal = 14.dp, vertical = 10.dp),
-      ) {
-        BubbleContent()
-      }
-      if (display.showUserAvatar) {
-        Spacer(Modifier.width(8.dp))
-        UserAvatar(userAvatarPath)
-      }
+    // 头像移到气泡上方，不再横向挤占正文；正文按屏幕自适应拉满。
+    if (display.showUserAvatar) {
+      UserAvatar(userAvatarPath)
+      Spacer(Modifier.height(4.dp))
+    }
+    Box(
+      modifier =
+        Modifier.fillMaxWidth()
+          .then(bubbleFeedback)
+          .glassPanel(shape = shape, strength = 0.45f, rimAlpha = 0.55f, elevation = 6.dp)
+          .padding(horizontal = 14.dp, vertical = 10.dp),
+    ) {
+      BubbleContent()
     }
     MessageMeta(message, display)
     MessageFooter(
@@ -511,7 +514,7 @@ private fun ProcessBlock(
 
   Column(
     modifier =
-      Modifier.widthIn(max = BubbleMaxWidth)
+      Modifier.fillMaxWidth()
         .glassPanel(
           shape = shape,
           strength = 0.52f,
@@ -820,6 +823,67 @@ internal fun parseMessageBlocks(raw: String): List<MessageBlock> {
   return blocks
 }
 
+private val MarkdownLinkPattern =
+  Regex("""\\?\(?\[([^\]\n]+)]\(\s*\[?(https?://[^\s)\]]+)\)*""")
+private val MarkdownInlineToken =
+  Regex(
+    """\\?\(?\[[^\]\n]+]\(\s*\[?https?://[^\s)\]]+\)*|\*\*[^*\n]+\*\*|`[^`\n]+`"""
+  )
+
+/**
+ * 聊天正文的轻量 Markdown 清理：链接只显示站点名，加粗和行内代码去掉标记。
+ * 完整的围栏代码块仍由 [CodeBlock] 独立渲染。
+ */
+internal fun formatInlineMarkdown(raw: String): AnnotatedString {
+  if (raw.isBlank()) return AnnotatedString("")
+  val text =
+    raw
+      .replace("\\(", "(")
+      .replace("\\)", ")")
+      .replace("]([", "](")
+      .replace(Regex("(?m)^#{1,6}\\s+"), "")
+  return buildAnnotatedString { appendFormattedInline(text) }
+}
+
+/** 递归处理加粗段里的链接和行内代码，避免 ``**...`Name`...**`` 把反引号漏出来。 */
+private fun AnnotatedString.Builder.appendFormattedInline(text: String) {
+  var cursor = 0
+  for (token in MarkdownInlineToken.findAll(text)) {
+    if (token.range.first > cursor) append(text.substring(cursor, token.range.first))
+    val value = token.value
+    when {
+      value.contains("](") -> {
+        val link = MarkdownLinkPattern.find(value)
+        if (link != null) {
+          withStyle(SpanStyle(fontWeight = FontWeight.Medium, textDecoration = TextDecoration.Underline)) {
+            append(link.groupValues[1])
+          }
+        } else {
+          append(value)
+        }
+      }
+      value.startsWith("**") && value.endsWith("**") -> {
+        withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) {
+          appendFormattedInline(value.substring(2, value.length - 2))
+        }
+      }
+      value.startsWith("`") && value.endsWith("`") -> {
+        withStyle(
+          SpanStyle(
+            fontFamily = FontFamily.Monospace,
+            background = LotusPalette.Ink.copy(alpha = 0.065f),
+          )
+        ) {
+          append(value.substring(1, value.length - 1))
+        }
+      }
+      else -> append(value)
+    }
+    cursor = token.range.last + 1
+  }
+  if (cursor < text.length) append(text.substring(cursor))
+}
+
 @Composable
 private fun PlainText(text: String) {
   val blocks = remember(text) { parseMessageBlocks(text) }
@@ -828,10 +892,11 @@ private fun PlainText(text: String) {
     blocks.forEach { block ->
       when (block) {
         is MessageBlock.Text ->
-          // 长按文字 = 系统那套"选取 / 复制 / 全选"（用户 2026-10-11 点名要的）。
+          // 长按文字 = 系统那套"选取 / 复制 / 全选"；只清理代码回复里的 Markdown 语法噪音。
           SelectionContainer {
+            val formatted = remember(block.content) { formatInlineMarkdown(block.content) }
             Text(
-              text = block.content,
+              text = formatted,
               color = LotusPalette.Ink,
               fontSize = 15.sp,
               lineHeight = 22.sp,
